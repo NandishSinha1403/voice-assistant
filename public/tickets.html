@@ -206,7 +206,8 @@
   <div class="topbar-right">
     <div class="live-dot"></div>
     <span style="font-size:13px;color:#8b949e">Live</span>
-    <a href="/" style="color:#8b949e;font-size:13px;text-decoration:none;">← Back to Agent</a>
+    <a href="/" style="color:#8b949e;font-size:13px;text-decoration:none;">← Agent</a>
+      <button id="logoutBtn" style="background:none;border:1px solid #30363d;border-radius:6px;color:#8b949e;padding:6px 12px;font-size:12px;cursor:pointer;margin-left:8px">Logout</button>
   </div>
 </div>
 
@@ -314,7 +315,9 @@
           <td class="files-cell hide-mobile">${t.files?.length ? `<span class="badge badge-green">📎 ${t.files.length}</span>` : '<span style="color:#8b949e">—</span>'}</td>
           <td class="date-cell hide-mobile">${dateStr}<br>${timeStr}</td>
           <td class="actions-cell">
-            <a class="action-link" href="/ticket/${t.id}/upload" target="_blank">📎 Upload</a>
+            <a class="action-link" href="/upload/${t.uploadToken || ''}" target="_blank">📎 Docs</a>
+            ${t.status === 'open'        ? `<button class="action-link" data-action="status" data-id="${t.id}" data-status="in-progress" style="cursor:pointer">▶ Start</button>` : ''}
+            ${t.status === 'in-progress' ? `<button class="action-link" data-action="status" data-id="${t.id}" data-status="resolved"    style="cursor:pointer;color:#3fb950">✓ Resolve</button>` : ''}
           </td>
         </tr>`;
     }).join('');
@@ -334,6 +337,28 @@
       activeFilter = btn.dataset.filter;
       render();
     });
+  });
+
+  // Auth check
+  fetch('/api/auth/me').then(r => { if (!r.ok) location.href = '/login?next=/tickets'; });
+  document.getElementById('logoutBtn').addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    location.href = '/login';
+  });
+
+  // Status update on row click
+  tableBody.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-action="status"]');
+    if (!btn) return;
+    const id     = btn.dataset.id;
+    const status = btn.dataset.status;
+    const note   = prompt(`Add a note for ticket ${id} (optional):`);
+    await fetch(`/api/admin/ticket/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, note: note || undefined }),
+    });
+    load();
   });
 
   // Auto-refresh every 10 seconds

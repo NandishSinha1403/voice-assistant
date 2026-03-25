@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>My Complaints — DMC</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh}
+
+    .topbar{background:#161b22;border-bottom:1px solid #30363d;padding:14px 20px;display:flex;align-items:center;justify-content:space-between}
+    .topbar-left{display:flex;align-items:center;gap:10px}
+    .topbar-icon{width:34px;height:34px;background:linear-gradient(135deg,#1f6feb,#388bfd);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
+    .topbar-title{font-size:15px;font-weight:700}
+    .topbar-sub{font-size:11px;color:#8b949e}
+    .logout-btn{background:none;border:1px solid #30363d;border-radius:6px;color:#8b949e;padding:6px 12px;font-size:12px;cursor:pointer}
+    .logout-btn:hover{border-color:#f85149;color:#f85149}
+
+    .main{padding:20px;max-width:700px;margin:0 auto}
+    .welcome{margin-bottom:24px}
+    .welcome-title{font-size:20px;font-weight:700;margin-bottom:4px}
+    .welcome-sub{font-size:13px;color:#8b949e}
+
+    .ticket-card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:16px;transition:border-color .2s}
+    .ticket-card:hover{border-color:#388bfd}
+    .ticket-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:12px}
+    .ticket-id{font-size:16px;font-weight:700;color:#388bfd}
+    .status-pill{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap}
+    .status-open{background:#1f6feb22;color:#388bfd;border:1px solid #1f6feb44}
+    .status-in-progress{background:#d2a8ff22;color:#d2a8ff;border:1px solid #d2a8ff44}
+    .status-resolved{background:#2ea04322;color:#3fb950;border:1px solid #2ea04344}
+    .status-closed{background:#30363d44;color:#8b949e;border:1px solid #30363d}
+
+    .complaint-text{font-size:14px;color:#e6edf3;margin-bottom:12px;line-height:1.5}
+    .ticket-meta{display:flex;gap:16px;flex-wrap:wrap}
+    .meta-item{font-size:12px;color:#8b949e}
+
+    .notes-section{margin-top:12px;padding-top:12px;border-top:1px solid #21262d}
+    .note{background:#0d1117;border-radius:6px;padding:10px 12px;margin-bottom:8px;font-size:13px}
+    .note-text{color:#e6edf3;margin-bottom:4px}
+    .note-meta{font-size:11px;color:#8b949e}
+
+    .upload-link{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:6px 12px;background:#21262d;border:1px solid #30363d;border-radius:6px;font-size:12px;color:#8b949e;text-decoration:none;font-weight:600}
+    .upload-link:hover{border-color:#388bfd;color:#388bfd}
+
+    .empty{text-align:center;padding:60px 20px;color:#8b949e}
+    .empty-icon{font-size:48px;margin-bottom:12px}
+    .empty-title{font-size:16px;font-weight:600;margin-bottom:6px;color:#e6edf3}
+    .empty-sub{font-size:13px}
+
+    .spinner{display:inline-block;width:20px;height:20px;border:2px solid #30363d;border-top-color:#388bfd;border-radius:50%;animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .loading{text-align:center;padding:40px;color:#8b949e}
+  </style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-icon">🏛️</div>
+    <div>
+      <div class="topbar-title">My Complaints</div>
+      <div class="topbar-sub" id="phoneDisplay">Delhi Municipal Corporation</div>
+    </div>
+  </div>
+  <button class="logout-btn" id="logoutBtn">Logout</button>
+</div>
+
+<div class="main">
+  <div id="loading" class="loading"><div class="spinner"></div><p style="margin-top:12px;font-size:14px">Loading your complaints…</p></div>
+  <div id="content" style="display:none"></div>
+</div>
+
+<script>
+(function(){
+  const loading     = document.getElementById('loading');
+  const content     = document.getElementById('content');
+  const phoneDisplay= document.getElementById('phoneDisplay');
+  const logoutBtn   = document.getElementById('logoutBtn');
+
+  logoutBtn.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method:'POST' });
+    location.href = '/login';
+  });
+
+  async function init() {
+    const me = await fetch('/api/auth/me');
+    if (!me.ok) { location.href = '/login'; return; }
+    const user = await me.json();
+    if (user.role !== 'citizen') { location.href = '/tickets'; return; }
+    phoneDisplay.textContent = user.id;
+
+    const res = await fetch('/api/my-tickets');
+    if (!res.ok) { location.href = '/login'; return; }
+    const tickets = await res.json();
+
+    loading.style.display = 'none';
+    content.style.display = 'block';
+
+    if (!tickets.length) {
+      content.innerHTML = `
+        <div class="empty">
+          <div class="empty-icon">📭</div>
+          <div class="empty-title">No complaints filed yet</div>
+          <div class="empty-sub">Complaints you file via the DMC helpline will appear here.</div>
+        </div>`;
+      return;
+    }
+
+    content.innerHTML = tickets.map(t => renderTicket(t)).join('');
+  }
+
+  function renderTicket(t) {
+    const date  = new Date(t.createdAt).toLocaleString('en-IN');
+    const notes = (t.notes || []).map(n => `
+      <div class="note">
+        <div class="note-text">${esc(n.text)}</div>
+        <div class="note-meta">— Admin · ${new Date(n.at).toLocaleString('en-IN')}</div>
+      </div>`).join('');
+
+    const hasToken = t.uploadToken && new Date(t.uploadExpiry) > new Date();
+    const uploadBtn = hasToken
+      ? `<a class="upload-link" href="/upload/${t.uploadToken}" target="_blank">📎 Upload Documents</a>`
+      : '';
+
+    return `
+      <div class="ticket-card">
+        <div class="ticket-top">
+          <div class="ticket-id">🎫 ${esc(t.id)}</div>
+          <span class="status-pill status-${(t.status||'open').replace(' ','-')}">${esc(t.status || 'open')}</span>
+        </div>
+        <div class="complaint-text">${esc(t.complaint)}</div>
+        <div class="ticket-meta">
+          <span class="meta-item">📅 ${date}</span>
+          <span class="meta-item">📎 ${t.files?.length || 0} file${t.files?.length !== 1 ? 's' : ''} uploaded</span>
+        </div>
+        ${notes ? `<div class="notes-section"><div style="font-size:12px;color:#8b949e;margin-bottom:8px;font-weight:600">UPDATES FROM DMC</div>${notes}</div>` : ''}
+        ${uploadBtn}
+      </div>`;
+  }
+
+  function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  init();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1460 @@
+diff --git a/.claude/settings.local.json b/.claude/settings.local.json
+index 079dae9..73eadaf 100644
+--- a/.claude/settings.local.json
++++ b/.claude/settings.local.json
+@@ -16,7 +16,12 @@
+       "Bash(cmd //c \"taskkill /F /PID 3408\")",
+       "Bash(cmd //c \"taskkill /F /PID 13212\")",
+       "Bash(cmd //c \"taskkill /F /PID 33404\")",
+-      "Bash(cmd //c \"taskkill /F /PID 34296\")"
++      "Bash(cmd //c \"taskkill /F /PID 34296\")",
++      "Bash(cmd //c \"taskkill /F /PID 25972\")",
++      "Bash(cmd //c \"taskkill /F /PID 28616\")",
++      "Bash(cmd //c \"taskkill /F /PID 12036\")",
++      "Bash(cmd //c \"curl -s -o nul -w \\\\\"%%{http_code}\\\\\" https://8fba-2a09-bac6-d866-1a8c-00-2a5-ea.ngrok-free.app/api/voice\" 2>&1)",
++      "Bash(cmd //c \"taskkill /F /PID 15684\")"
+     ]
+   }
+ }
+diff --git a/lib/gemini.js b/lib/gemini.js
+index 1153a0a..74ceed4 100644
+--- a/lib/gemini.js
++++ b/lib/gemini.js
+@@ -2,13 +2,38 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
+ 
+ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+ 
++const tools = [{
++  functionDeclarations: [{
++    name: 'create_ticket',
++    description: 'Create a complaint ticket after collecting the citizen\'s full name, registered mobile number, and complaint description. Only call this AFTER you have confirmed all three details with the citizen.',
++    parameters: {
++      type: 'OBJECT',
++      properties: {
++        name:      { type: 'STRING', description: 'Full name of the citizen' },
++        phone:     { type: 'STRING', description: 'Registered 10-digit Indian mobile number' },
++        complaint: { type: 'STRING', description: 'Full description of the complaint' },
++      },
++      required: ['name', 'phone', 'complaint'],
++    },
++  }],
++}];
++
+ const model = genAI.getGenerativeModel({
+   model: 'gemini-2.5-flash',
+-  systemInstruction: `You are a helpful AI assistant for the Delhi Municipal Corporation. You help citizens with queries about property tax, water bills, building permits, complaints, and other municipal services. Keep responses short, clear, and under 3 sentences — this is a phone call. You can understand Hindi and Hinglish. Always be polite and professional.
++  tools,
++  systemInstruction: `You are a helpful AI assistant for the Delhi Municipal Corporation. You help citizens with queries about property tax, water bills, building permits, complaints, and other municipal services. This is a phone call — keep responses clear and spoken naturally.
++
++LANGUAGE RULE: Detect the language the user speaks (Hindi, English, or Hinglish) and ALWAYS reply in the exact same language. Never switch unless the user does.
+ 
+-LANGUAGE RULE (most important): Read the user's message carefully. Detect the language they used — Hindi, English, or Hinglish. ALWAYS reply in the exact same language. Never switch languages unless the user does first.
++COMPLAINT TICKET FLOW: When a citizen wants to file a complaint:
++1. Ask for their full name.
++2. Ask for their registered 10-digit mobile number.
++3. Ask for a clear description of the complaint.
++4. Confirm all three details back to them.
++5. Once confirmed, call the create_ticket function — do NOT call it before confirmation.
++6. After the ticket is created, read the ticket ID clearly digit by digit and tell them an SMS with an upload link has been sent to their phone.
+ 
+-RESPONSE RULE: Give a complete, full answer — never stop mid-sentence. Always finish your sentences. No markdown, no bullet points — plain spoken words only.`,
++RESPONSE STYLE: Complete sentences only — never cut off mid-sentence. No markdown, no bullet points. Plain spoken words only.`,
+   generationConfig: {
+     maxOutputTokens: 500,
+     temperature: 0.8,
+@@ -17,27 +42,73 @@ RESPONSE RULE: Give a complete, full answer — never stop mid-sentence. Always
+ 
+ const MAX_HISTORY_PAIRS = 15;
+ 
+-// History format: Gemini [{ role: 'user'|'model', parts: [{ text }] }]
+-
+ async function getReply(history, userText) {
+   let trimmed = history.slice(-(MAX_HISTORY_PAIRS * 2));
+ 
+-  // Gemini requires history to start with 'user' — trimming an odd index can violate this
++  // Gemini requires history to start with 'user' role
+   if (trimmed.length > 0 && trimmed[0].role !== 'user') {
+     trimmed = trimmed.slice(1);
+   }
+ 
+   const chat = model.startChat({ history: trimmed });
+   const result = await chat.sendMessage(userText);
+-  const reply = result.response.text().trim();
++  const response = result.response;
++
++  // Check for function call
++  const fnCalls = response.functionCalls ? response.functionCalls() : [];
++  if (fnCalls && fnCalls.length > 0) {
++    const fn = fnCalls[0];
++    // Build updated history including the model's function call turn
++    const updatedHistory = [
++      ...trimmed,
++      { role: 'user',  parts: [{ text: userText }] },
++      { role: 'model', parts: response.candidates[0].content.parts },
++    ];
++    return { reply: null, functionCall: { name: fn.name, args: fn.args }, updatedHistory };
++  }
+ 
++  const reply = response.text().trim();
+   const updatedHistory = [
+     ...trimmed,
+     { role: 'user',  parts: [{ text: userText }] },
+     { role: 'model', parts: [{ text: reply }] },
+   ];
+ 
++  return { reply, functionCall: null, updatedHistory };
++}
++
++async function continueWithFunctionResult(history, functionName, functionResult) {
++  let trimmed = history.slice(-(MAX_HISTORY_PAIRS * 2));
++  if (trimmed.length > 0 && trimmed[0].role !== 'user') {
++    trimmed = trimmed.slice(1);
++  }
++
++  // history already contains the function call as last model turn
++  // We need to send the function response
++  const chat = model.startChat({ history: trimmed.slice(0, -1) }); // history without last model turn
++  const lastModelTurn = trimmed[trimmed.length - 1];
++
++  // Re-send the last user message + function result
++  // Use sendMessage with the function response part
++  const result = await chat.sendMessage([
++    // First re-send what triggered the function call (the model's function call is in history)
++    // Actually we need to send the functionResponse as the next turn
++    {
++      functionResponse: {
++        name: functionName,
++        response: functionResult,
++      },
++    },
++  ]);
++
++  const reply = result.response.text().trim();
++  const updatedHistory = [
++    ...trimmed,
++    { role: 'user',  parts: [{ functionResponse: { name: functionName, response: functionResult } }] },
++    { role: 'model', parts: [{ text: reply }] },
++  ];
++
+   return { reply, updatedHistory };
+ }
+ 
+-module.exports = { getReply };
++module.exports = { getReply, continueWithFunctionResult };
+diff --git a/lib/sms.js b/lib/sms.js
+new file mode 100644
+index 0000000..8ba8d5c
+--- /dev/null
++++ b/lib/sms.js
+@@ -0,0 +1,29 @@
++const twilio = require('twilio');
++
++async function sendTicketSms(toPhone, ticketId, uploadUrl) {
++  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER } = process.env;
++
++  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
++    console.warn('[SMS] Twilio env vars missing — skipping SMS');
++    return;
++  }
++
++  const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
++
++  const body =
++    `Delhi Municipal Corporation\n` +
++    `Your complaint has been successfully registered.\n\n` +
++    `Ticket ID: ${ticketId}\n\n` +
++    `Upload supporting photos/documents (link valid 48 hours):\n${uploadUrl}`;
++
++  const msg = await client.messages.create({
++    from: TWILIO_PHONE_NUMBER,
++    to:   toPhone,
++    body,
++  });
++
++  console.log(`[SMS] Sent to ${toPhone} — SID: ${msg.sid}`);
++  return msg;
++}
++
++module.exports = { sendTicketSms };
+diff --git a/lib/ticket-store.js b/lib/ticket-store.js
+new file mode 100644
+index 0000000..16729b9
+--- /dev/null
++++ b/lib/ticket-store.js
+@@ -0,0 +1,79 @@
++const crypto  = require('crypto');
++const tickets = new Map();
++const tokens  = new Map(); // token → ticketId
++
++const TOKEN_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
++
++// Daily counter: { date: 'YYYYMMDD', count: N }
++let counter = { date: '', count: 0 };
++
++function todayStr() {
++  return new Date().toISOString().slice(0, 10).replace(/-/g, '');
++}
++
++function nextId() {
++  const today = todayStr();
++  if (counter.date !== today) {
++    counter.date  = today;
++    counter.count = 0;
++  }
++  counter.count++;
++  return `DMC-${today}-${String(counter.count).padStart(4, '0')}`;
++}
++
++function normalizePhone(phone) {
++  const digits = String(phone).replace(/\D/g, '');
++  if (digits.length === 10) return '+91' + digits;
++  if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
++  return phone;
++}
++
++function createTicket(name, phone, complaint) {
++  const id    = nextId();
++  const token = crypto.randomBytes(24).toString('hex'); // 48-char URL-safe token
++  const expiry = new Date(Date.now() + TOKEN_TTL_MS).toISOString();
++
++  const ticket = {
++    id,
++    name:        name.trim(),
++    phone:       normalizePhone(phone),
++    complaint:   complaint.trim(),
++    status:      'open',
++    createdAt:   new Date().toISOString(),
++    uploadToken: token,
++    uploadExpiry: expiry,
++    files:       [],
++  };
++
++  tickets.set(id, ticket);
++  tokens.set(token, id);
++  console.log(`[TICKET] Created ${id} — token expires ${expiry}`);
++  return ticket;
++}
++
++function getTicket(id) {
++  return tickets.get(id) || null;
++}
++
++// Resolve token → ticket, checking expiry
++function getTicketByToken(token) {
++  const id = tokens.get(token);
++  if (!id) return { ticket: null, error: 'invalid' };
++  const ticket = tickets.get(id);
++  if (!ticket) return { ticket: null, error: 'invalid' };
++  if (Date.now() > new Date(ticket.uploadExpiry).getTime()) {
++    return { ticket: null, error: 'expired' };
++  }
++  return { ticket, error: null };
++}
++
++function addFile(ticketId, fileMetadata) {
++  const ticket = tickets.get(ticketId);
++  if (ticket) ticket.files.push(fileMetadata);
++}
++
++function getAllTickets() {
++  return Array.from(tickets.values()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
++}
++
++module.exports = { createTicket, getTicket, getTicketByToken, addFile, getAllTickets };
+diff --git a/lib/twilio-call.js b/lib/twilio-call.js
+index 5fbb559..06375d1 100644
+--- a/lib/twilio-call.js
++++ b/lib/twilio-call.js
+@@ -1,23 +1,39 @@
+ const twilio = require('twilio');
+ 
+-function makeCall(toNumber, webhookBaseUrl) {
+-  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER } = process.env;
+-
+-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
+-    throw new Error('Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER in .env');
++// Singleton client — created once, reused on every call
++let _client = null;
++function getClient() {
++  if (!_client) {
++    const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
++    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
++      throw new Error('Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN in .env');
++    }
++    _client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+   }
++  return _client;
++}
++
++async function makeCall(toNumber, webhookBaseUrl) {
++  const { TWILIO_PHONE_NUMBER } = process.env;
++  if (!TWILIO_PHONE_NUMBER) throw new Error('Missing TWILIO_PHONE_NUMBER in .env');
+ 
+-  const base   = webhookBaseUrl.replace(/\/$/, '');
+-  const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
++  const base = webhookBaseUrl.replace(/\/$/, '');
++  const client = getClient();
+ 
+-  return client.calls.create({
+-    from:         TWILIO_PHONE_NUMBER,
+-    to:           toNumber,
+-    url:          `${base}/api/voice`,
+-    statusCallback: `${base}/api/twilio/status`,
+-    statusCallbackMethod: 'POST',
+-    timeout:      30,
++  console.log(`[CALL] Placing call → ${toNumber} from ${TWILIO_PHONE_NUMBER}`);
++  console.log(`[CALL] Webhook: ${base}/api/voice`);
++
++  const call = await client.calls.create({
++    from:                TWILIO_PHONE_NUMBER,
++    to:                  toNumber,
++    url:                 `${base}/api/voice`,
++    statusCallback:      `${base}/api/twilio/status`,
++    statusCallbackMethod:'POST',
++    timeout:             30,
+   });
++
++  console.log(`[CALL] Created — sid: ${call.sid}, status: ${call.status}`);
++  return call;
+ }
+ 
+ module.exports = { makeCall };
+diff --git a/lib/ws-handler.js b/lib/ws-handler.js
+index e2dc28d..14cf632 100644
+--- a/lib/ws-handler.js
++++ b/lib/ws-handler.js
+@@ -1,96 +1,125 @@
+-const { getReply }     = require('./gemini');
+-const { emitTranscript } = require('./session');
+-
+-// ConversationRelay protocol (no STT/TTS needed — Twilio handles it)
+-// Receive: { type: "setup" | "prompt" | "interrupt", ... }
+-// Send:    { type: "text", token: "...", last: true/false }
++const { getReply, continueWithFunctionResult } = require('./gemini');
++const { emitTranscript }  = require('./session');
++const { createTicket }    = require('./ticket-store');
++const { sendTicketSms }   = require('./sms');
+ 
+ const GREETING = 'Namaste! Welcome to Delhi Municipal Corporation helpline. You can speak in Hindi, Hinglish, or English. Please go ahead.';
+ 
+ function handleConnection(ws) {
+-  let callSid = null;
+-  let history  = [];
++  let callSid     = null;
++  let callerPhone = null;
++  let history     = [];
+ 
+   ws.on('message', async (raw) => {
+     const rawStr = raw.toString();
+-
+-    // Log every single message — first 300 chars so we can see structure
+-    console.log(`[WS RAW] ${rawStr.slice(0, 300)}`);
+-
+     let msg;
+-    try { msg = JSON.parse(rawStr); } catch { console.log('[WS] non-JSON message'); return; }
++    try { msg = JSON.parse(rawStr); } catch { return; }
+ 
+-    console.log(`[WS] type="${msg.type || msg.event}" keys=${Object.keys(msg).join(',')}`);
+-
+-    // Handle both ConversationRelay ("type") and Media Streams ("event") protocols
+     const msgType = msg.type || msg.event;
+ 
+     switch (msgType) {
+ 
+-      // ── ConversationRelay messages ─────────────────────────────────────────
+       case 'setup':
+-        callSid = msg.callSid;
+-        console.log(`[CR] Setup — callSid: ${callSid}, full msg:`, JSON.stringify(msg));
+-        history = [];  // start empty — greeting is spoken by ConversationRelay
++        callSid     = msg.callSid;
++        // msg.to is the actual user's number (we dial OUT from Twilio TO the user)
++        // msg.from is the Twilio number — never use that as SMS target
++        callerPhone = msg.to || msg.from || null;
++        console.log(`[CR] Connected — callSid: ${callSid}, callerPhone: ${callerPhone} (from=${msg.from} to=${msg.to})`);
++        history = [];
+         break;
+ 
+       case 'prompt': {
+-        const userText = (msg.voicePrompt || msg.text || '').trim();
+-        const lang     = msg.lang || 'en-IN';
+-        console.log(`[CR] Prompt received — lang=${lang} voicePrompt="${msg.voicePrompt}" last=${msg.last}`);
+-        if (!userText) { console.log('[CR] Empty prompt, skipping'); return; }
++        const userText = (msg.voicePrompt || '').trim();
++        if (!userText) return;
+         console.log(`[CR] User said: "${userText}"`);
+         emitTranscript({ type: 'user', text: userText, callSid });
+ 
+         try {
+-          console.log('[CR] Calling Gemini...');
+-          const { reply, updatedHistory } = await getReply(history, userText, lang);
++          const { reply, functionCall, updatedHistory } = await getReply(history, userText);
+           history = updatedHistory;
+-          console.log(`[CR] Gemini replied: "${reply}"`);
+-          emitTranscript({ type: 'ai', text: reply, callSid });
+-
+-          if (ws.readyState === 1) {
+-            const payload = JSON.stringify({ type: 'text', token: reply, last: true });
+-            console.log(`[CR] Sending back: ${payload}`);
+-            ws.send(payload);
+-          } else {
+-            console.log(`[CR] WS not open (readyState=${ws.readyState}), cannot send`);
++
++          if (functionCall && functionCall.name === 'create_ticket') {
++            await handleTicketCreation(ws, functionCall.args, callerPhone, callSid);
++          } else if (reply) {
++            console.log(`[CR] Jarvis: "${reply}"`);
++            emitTranscript({ type: 'ai', text: reply, callSid });
++            send(ws, { type: 'text', token: reply, last: true });
+           }
+         } catch (err) {
+-          console.error('[CR] Gemini error:', err.message, err.stack);
++          console.error('[CR] Error in prompt handler:', err.message, err.stack);
+         }
+         break;
+       }
+ 
+       case 'interrupt':
+-        console.log(`[CR] Caller interrupted`);
+-        break;
+-
+-      // ── Legacy Media Streams messages (fallback detection) ─────────────────
+-      case 'connected':
+-        console.log('[WS] Twilio Media Streams connected — ConversationRelay NOT active!');
+-        break;
+-
+-      case 'start':
+-        console.log('[WS] Media Streams "start" — this means ConversationRelay TwiML was not used');
+-        break;
+-
+-      case 'media':
+-        // Silently count media packets — don't log each one
++        console.log('[CR] Caller interrupted');
+         break;
+ 
+       default:
+-        console.log(`[WS] Unknown message type: "${msgType}", full:`, JSON.stringify(msg).slice(0, 200));
+         break;
+     }
+   });
+ 
+   ws.on('close', () => {
+-    console.log(`[CR] Call disconnected — callSid: ${callSid}`);
++    console.log(`[CR] Disconnected — callSid: ${callSid}`);
+     if (callSid) emitTranscript({ type: 'call_ended', callSid });
+   });
+ 
+   ws.on('error', (err) => console.error('[CR] WS error:', err.message));
++
++  async function handleTicketCreation(ws, args, callerPhone, callSid) {
++    const { name, phone, complaint } = args;
++
++    if (!name || !phone || !complaint) {
++      console.error('[TICKET] Missing fields in function call args:', args);
++      send(ws, { type: 'text', token: 'I am sorry, I could not create the ticket. Please provide your name, phone number, and complaint again.', last: true });
++      return;
++    }
++
++    // Create the ticket
++    const ticket   = createTicket(name, phone, complaint);
++    const base      = process.env.BASE_URL || 'http://localhost:3000';
++    const uploadUrl = `${base}/upload/${ticket.uploadToken}`;
++
++    console.log(`[TICKET] ${ticket.id} created — upload URL: ${uploadUrl}`);
++    emitTranscript({ type: 'ai', text: `Ticket ${ticket.id} created for ${name}`, callSid });
++
++    // Send SMS — non-blocking, failure should not stop the call
++    const smsTarget = callerPhone || phone;
++    try {
++      await sendTicketSms(smsTarget, ticket.id, uploadUrl);
++    } catch (err) {
++      console.error('[TICKET] SMS failed, continuing:', err.message);
++    }
++
++    // Ask Gemini to speak the confirmation
++    const functionResult = {
++      ticketId:   ticket.id,
++      status:     'created',
++      uploadLink: uploadUrl,
++      smsSent:    true,
++    };
++
++    try {
++      const { reply, updatedHistory } = await continueWithFunctionResult(
++        history, 'create_ticket', functionResult
++      );
++      history = updatedHistory;
++      console.log(`[CR] Ticket confirmation: "${reply}"`);
++      emitTranscript({ type: 'ai', text: reply, callSid });
++      send(ws, { type: 'text', token: reply, last: true });
++    } catch (err) {
++      // Fallback spoken message if Gemini fails
++      console.error('[TICKET] continueWithFunctionResult failed:', err.message);
++      const fallback = `Your complaint has been registered. Your ticket number is ${ticket.id.split('').join(' ')}. An SMS with the upload link has been sent to your phone. Thank you for contacting Delhi Municipal Corporation.`;
++      emitTranscript({ type: 'ai', text: fallback, callSid });
++      send(ws, { type: 'text', token: fallback, last: true });
++    }
++  }
++}
++
++function send(ws, data) {
++  if (ws.readyState === 1) ws.send(JSON.stringify(data));
+ }
+ 
+ module.exports = { handleConnection };
+diff --git a/package-lock.json b/package-lock.json
+index 9191c71..0f77edc 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -11,6 +11,7 @@
+         "@google-cloud/speech": "^6.7.0",
+         "@google-cloud/text-to-speech": "^5.3.0",
+         "@google/generative-ai": "^0.21.0",
++        "busboy": "^1.6.0",
+         "dotenv": "^16.4.5",
+         "ngrok": "^5.0.0-beta.2",
+         "twilio": "^5.3.7",
+@@ -485,6 +486,17 @@
+       "integrity": "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==",
+       "license": "BSD-3-Clause"
+     },
++    "node_modules/busboy": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/busboy/-/busboy-1.6.0.tgz",
++      "integrity": "sha512-8SFQbg/0hQ9xy3UNTB0YEnsNBbWfhf7RtnzpL7TkBiTBRfrQ9Fxcnz7VJsleJpyp6rVLvXiuORqjlHi5q+PYuA==",
++      "dependencies": {
++        "streamsearch": "^1.1.0"
++      },
++      "engines": {
++        "node": ">=10.16.0"
++      }
++    },
+     "node_modules/cacheable-lookup": {
+       "version": "5.0.4",
+       "resolved": "https://registry.npmjs.org/cacheable-lookup/-/cacheable-lookup-5.0.4.tgz",
+@@ -1768,6 +1780,14 @@
+       "integrity": "sha512-76ORR0DO1o1hlKwTbi/DM3EXWGf3ZJYO8cXX5RJwnul2DEg2oyoZyjLNoQM8WsvZiFKCRfC1O0J7iCvie3RZmQ==",
+       "license": "MIT"
+     },
++    "node_modules/streamsearch": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/streamsearch/-/streamsearch-1.1.0.tgz",
++      "integrity": "sha512-Mcc5wHehp9aXz1ax6bZUyY5afg9u2rv5cqQI3mRrYkGC8rW2hM02jWuwjtL++LS5qinSyhj2QfLyNsuc+VsExg==",
++      "engines": {
++        "node": ">=10.0.0"
++      }
++    },
+     "node_modules/string_decoder": {
+       "version": "1.3.0",
+       "resolved": "https://registry.npmjs.org/string_decoder/-/string_decoder-1.3.0.tgz",
+diff --git a/package.json b/package.json
+index 2b1a8b2..20d9a48 100644
+--- a/package.json
++++ b/package.json
+@@ -12,6 +12,7 @@
+     "@google-cloud/speech": "^6.7.0",
+     "@google-cloud/text-to-speech": "^5.3.0",
+     "@google/generative-ai": "^0.21.0",
++    "busboy": "^1.6.0",
+     "dotenv": "^16.4.5",
+     "ngrok": "^5.0.0-beta.2",
+     "twilio": "^5.3.7",
+diff --git a/public/tickets.html b/public/tickets.html
+new file mode 100644
+index 0000000..dd4654c
+--- /dev/null
++++ b/public/tickets.html
+@@ -0,0 +1,345 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++  <meta charset="UTF-8"/>
++  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
++  <title>Ticket Dashboard — DMC</title>
++  <style>
++    * { box-sizing: border-box; margin: 0; padding: 0; }
++    body {
++      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
++      background: #0d1117;
++      color: #e6edf3;
++      min-height: 100vh;
++    }
++
++    /* ── Header ── */
++    .topbar {
++      background: #161b22;
++      border-bottom: 1px solid #30363d;
++      padding: 14px 24px;
++      display: flex;
++      align-items: center;
++      justify-content: space-between;
++      position: sticky; top: 0; z-index: 10;
++    }
++    .topbar-left { display: flex; align-items: center; gap: 12px; }
++    .topbar-icon {
++      width: 36px; height: 36px;
++      background: linear-gradient(135deg, #1f6feb, #388bfd);
++      border-radius: 8px;
++      display: flex; align-items: center; justify-content: center;
++      font-size: 18px;
++    }
++    .topbar-title { font-size: 16px; font-weight: 700; }
++    .topbar-sub   { font-size: 12px; color: #8b949e; }
++    .topbar-right { display: flex; align-items: center; gap: 12px; }
++
++    .badge {
++      display: inline-flex; align-items: center; gap: 6px;
++      padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600;
++    }
++    .badge-blue  { background: #1f6feb22; color: #388bfd; border: 1px solid #1f6feb44; }
++    .badge-green { background: #2ea04322; color: #3fb950; border: 1px solid #2ea04344; }
++    .badge-gray  { background: #30363d44; color: #8b949e; border: 1px solid #30363d; }
++
++    .live-dot {
++      width: 8px; height: 8px; border-radius: 50%;
++      background: #3fb950; box-shadow: 0 0 6px #3fb950;
++      animation: pulse 2s infinite;
++    }
++    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
++
++    /* ── Layout ── */
++    .main { padding: 24px; max-width: 1100px; margin: 0 auto; }
++
++    /* ── Stats row ── */
++    .stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
++    .stat-card {
++      flex: 1; min-width: 140px;
++      background: #161b22;
++      border: 1px solid #30363d;
++      border-radius: 10px;
++      padding: 16px 20px;
++    }
++    .stat-value { font-size: 28px; font-weight: 700; color: #388bfd; }
++    .stat-label { font-size: 13px; color: #8b949e; margin-top: 2px; }
++
++    /* ── Search & filter ── */
++    .toolbar {
++      display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;
++    }
++    .search-wrap { position: relative; flex: 1; min-width: 200px; }
++    .search-wrap input {
++      width: 100%;
++      background: #161b22;
++      border: 1px solid #30363d;
++      border-radius: 8px;
++      padding: 9px 12px 9px 36px;
++      color: #e6edf3;
++      font-size: 14px;
++      outline: none;
++    }
++    .search-wrap input:focus { border-color: #388bfd; }
++    .search-icon {
++      position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
++      color: #8b949e; font-size: 16px; pointer-events: none;
++    }
++    .filter-btn {
++      background: #161b22;
++      border: 1px solid #30363d;
++      border-radius: 8px;
++      padding: 9px 16px;
++      color: #e6edf3;
++      font-size: 13px;
++      cursor: pointer;
++      transition: border-color 0.2s;
++    }
++    .filter-btn:hover, .filter-btn.active { border-color: #388bfd; color: #388bfd; }
++    .refresh-btn {
++      background: #1f6feb;
++      border: none;
++      border-radius: 8px;
++      padding: 9px 16px;
++      color: #fff;
++      font-size: 13px;
++      font-weight: 600;
++      cursor: pointer;
++    }
++    .refresh-btn:hover { background: #388bfd; }
++
++    /* ── Table ── */
++    .table-wrap {
++      background: #161b22;
++      border: 1px solid #30363d;
++      border-radius: 12px;
++      overflow: hidden;
++    }
++    table { width: 100%; border-collapse: collapse; }
++    th {
++      padding: 12px 16px;
++      text-align: left;
++      font-size: 12px;
++      font-weight: 600;
++      color: #8b949e;
++      text-transform: uppercase;
++      letter-spacing: 0.5px;
++      background: #1c2128;
++      border-bottom: 1px solid #30363d;
++    }
++    td {
++      padding: 14px 16px;
++      font-size: 14px;
++      border-bottom: 1px solid #21262d;
++      vertical-align: top;
++    }
++    tr:last-child td { border-bottom: none; }
++    tr:hover td { background: #1c2128; }
++
++    .ticket-id-cell { font-weight: 700; color: #388bfd; white-space: nowrap; }
++    .complaint-cell { color: #e6edf3; max-width: 260px; }
++    .complaint-text { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
++    .name-cell { white-space: nowrap; }
++    .phone-cell { color: #8b949e; white-space: nowrap; font-size: 13px; }
++    .date-cell  { color: #8b949e; font-size: 12px; white-space: nowrap; }
++    .files-cell { text-align: center; }
++    .actions-cell { white-space: nowrap; }
++
++    .status-pill {
++      display: inline-block;
++      padding: 2px 10px;
++      border-radius: 20px;
++      font-size: 12px;
++      font-weight: 600;
++    }
++    .status-open     { background: #1f6feb22; color: #388bfd; border: 1px solid #1f6feb44; }
++    .status-resolved { background: #2ea04322; color: #3fb950; border: 1px solid #2ea04344; }
++    .status-closed   { background: #30363d44; color: #8b949e; border: 1px solid #30363d; }
++
++    .action-link {
++      display: inline-block;
++      padding: 4px 10px;
++      border-radius: 6px;
++      font-size: 12px;
++      font-weight: 600;
++      text-decoration: none;
++      background: #21262d;
++      color: #8b949e;
++      border: 1px solid #30363d;
++      margin-right: 6px;
++      transition: all 0.15s;
++    }
++    .action-link:hover { border-color: #388bfd; color: #388bfd; }
++
++    .empty-state {
++      text-align: center;
++      padding: 60px 20px;
++      color: #8b949e;
++    }
++    .empty-icon { font-size: 48px; margin-bottom: 12px; }
++    .empty-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
++    .empty-sub { font-size: 13px; }
++
++    .spinner {
++      display: inline-block; width: 18px; height: 18px;
++      border: 2px solid #30363d; border-top-color: #388bfd;
++      border-radius: 50%; animation: spin 0.8s linear infinite;
++    }
++    @keyframes spin { to { transform: rotate(360deg); } }
++
++    @media (max-width: 700px) {
++      .stat-card { min-width: 100px; }
++      th.hide-mobile, td.hide-mobile { display: none; }
++    }
++  </style>
++</head>
++<body>
++
++<div class="topbar">
++  <div class="topbar-left">
++    <div class="topbar-icon">🏛️</div>
++    <div>
++      <div class="topbar-title">DMC Complaint Dashboard</div>
++      <div class="topbar-sub">Delhi Municipal Corporation</div>
++    </div>
++  </div>
++  <div class="topbar-right">
++    <div class="live-dot"></div>
++    <span style="font-size:13px;color:#8b949e">Live</span>
++    <a href="/" style="color:#8b949e;font-size:13px;text-decoration:none;">← Back to Agent</a>
++  </div>
++</div>
++
++<div class="main">
++
++  <div class="stats" id="statsRow">
++    <div class="stat-card"><div class="stat-value" id="statTotal">—</div><div class="stat-label">Total Tickets</div></div>
++    <div class="stat-card"><div class="stat-value" id="statOpen" style="color:#388bfd">—</div><div class="stat-label">Open</div></div>
++    <div class="stat-card"><div class="stat-value" id="statFiles" style="color:#3fb950">—</div><div class="stat-label">Files Uploaded</div></div>
++    <div class="stat-card"><div class="stat-value" id="statToday" style="color:#d2a8ff">—</div><div class="stat-label">Today</div></div>
++  </div>
++
++  <div class="toolbar">
++    <div class="search-wrap">
++      <span class="search-icon">🔍</span>
++      <input type="text" id="searchInput" placeholder="Search by name, phone, or complaint…"/>
++    </div>
++    <button class="filter-btn active" data-filter="all">All</button>
++    <button class="filter-btn" data-filter="open">Open</button>
++    <button class="filter-btn" data-filter="resolved">Resolved</button>
++    <button class="refresh-btn" id="refreshBtn">⟳ Refresh</button>
++  </div>
++
++  <div class="table-wrap">
++    <table>
++      <thead>
++        <tr>
++          <th>Ticket ID</th>
++          <th>Name</th>
++          <th class="hide-mobile">Phone</th>
++          <th>Complaint</th>
++          <th>Status</th>
++          <th class="hide-mobile">Files</th>
++          <th class="hide-mobile">Filed</th>
++          <th>Actions</th>
++        </tr>
++      </thead>
++      <tbody id="tableBody">
++        <tr><td colspan="8" style="text-align:center;padding:40px"><div class="spinner"></div></td></tr>
++      </tbody>
++    </table>
++  </div>
++
++</div>
++
++<script>
++(function () {
++  let allTickets  = [];
++  let activeFilter = 'all';
++
++  const tableBody  = document.getElementById('tableBody');
++  const searchInput = document.getElementById('searchInput');
++  const refreshBtn  = document.getElementById('refreshBtn');
++
++  async function load() {
++    try {
++      const res = await fetch('/api/tickets');
++      allTickets = await res.json();
++      updateStats();
++      render();
++    } catch {
++      tableBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#f85149;padding:40px">Failed to load tickets</td></tr>';
++    }
++  }
++
++  function updateStats() {
++    const today = new Date().toISOString().slice(0, 10);
++    document.getElementById('statTotal').textContent = allTickets.length;
++    document.getElementById('statOpen').textContent  = allTickets.filter(t => t.status === 'open').length;
++    document.getElementById('statFiles').textContent = allTickets.reduce((s, t) => s + (t.files?.length || 0), 0);
++    document.getElementById('statToday').textContent = allTickets.filter(t => t.createdAt?.startsWith(today)).length;
++  }
++
++  function render() {
++    const q = searchInput.value.toLowerCase().trim();
++    let list = allTickets.filter(t => {
++      if (activeFilter !== 'all' && t.status !== activeFilter) return false;
++      if (!q) return true;
++      return (t.name + t.phone + t.complaint + t.id).toLowerCase().includes(q);
++    });
++
++    if (!list.length) {
++      tableBody.innerHTML = `
++        <tr><td colspan="8">
++          <div class="empty-state">
++            <div class="empty-icon">📭</div>
++            <div class="empty-title">${allTickets.length === 0 ? 'No tickets yet' : 'No matching tickets'}</div>
++            <div class="empty-sub">${allTickets.length === 0 ? 'Complaints filed via phone calls will appear here.' : 'Try a different search or filter.'}</div>
++          </div>
++        </td></tr>`;
++      return;
++    }
++
++    tableBody.innerHTML = list.map(t => {
++      const date   = new Date(t.createdAt);
++      const dateStr = date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
++      const timeStr = date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
++      return `
++        <tr>
++          <td class="ticket-id-cell">${esc(t.id)}</td>
++          <td class="name-cell">${esc(t.name)}</td>
++          <td class="phone-cell hide-mobile">${esc(t.phone)}</td>
++          <td class="complaint-cell"><div class="complaint-text" title="${esc(t.complaint)}">${esc(t.complaint)}</div></td>
++          <td><span class="status-pill status-${t.status}">${t.status}</span></td>
++          <td class="files-cell hide-mobile">${t.files?.length ? `<span class="badge badge-green">📎 ${t.files.length}</span>` : '<span style="color:#8b949e">—</span>'}</td>
++          <td class="date-cell hide-mobile">${dateStr}<br>${timeStr}</td>
++          <td class="actions-cell">
++            <a class="action-link" href="/ticket/${t.id}/upload" target="_blank">📎 Upload</a>
++          </td>
++        </tr>`;
++    }).join('');
++  }
++
++  function esc(s) {
++    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
++  }
++
++  // Events
++  searchInput.addEventListener('input', render);
++  refreshBtn.addEventListener('click', load);
++  document.querySelectorAll('.filter-btn').forEach(btn => {
++    btn.addEventListener('click', () => {
++      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
++      btn.classList.add('active');
++      activeFilter = btn.dataset.filter;
++      render();
++    });
++  });
++
++  // Auto-refresh every 10 seconds
++  load();
++  setInterval(load, 10000);
++})();
++</script>
++</body>
++</html>
+diff --git a/public/upload.html b/public/upload.html
+new file mode 100644
+index 0000000..69667d8
+--- /dev/null
++++ b/public/upload.html
+@@ -0,0 +1,238 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++  <meta charset="UTF-8"/>
++  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
++  <title>Upload Documents — DMC Complaint</title>
++  <style>
++    * { box-sizing: border-box; margin: 0; padding: 0; }
++    body {
++      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
++      background: #0d1117;
++      color: #e6edf3;
++      min-height: 100vh;
++      padding: 24px 16px;
++    }
++    .container { max-width: 540px; margin: 0 auto; }
++
++    .header {
++      text-align: center;
++      margin-bottom: 32px;
++    }
++    .logo {
++      display: inline-flex;
++      align-items: center;
++      gap: 10px;
++      margin-bottom: 8px;
++    }
++    .logo-icon {
++      width: 44px; height: 44px;
++      background: linear-gradient(135deg, #1f6feb, #388bfd);
++      border-radius: 12px;
++      display: flex; align-items: center; justify-content: center;
++      font-size: 22px;
++    }
++    .logo-text { font-size: 18px; font-weight: 700; color: #388bfd; }
++    .subtitle { color: #8b949e; font-size: 14px; margin-top: 4px; }
++
++    .ticket-card {
++      background: #161b22;
++      border: 1px solid #30363d;
++      border-radius: 12px;
++      padding: 20px;
++      margin-bottom: 24px;
++    }
++    .ticket-id {
++      font-size: 22px;
++      font-weight: 700;
++      color: #388bfd;
++      letter-spacing: 1px;
++      margin-bottom: 12px;
++    }
++    .ticket-row {
++      display: flex;
++      gap: 8px;
++      margin-bottom: 6px;
++      font-size: 14px;
++    }
++    .ticket-label { color: #8b949e; min-width: 80px; }
++    .ticket-value { color: #e6edf3; }
++    .status-badge {
++      display: inline-block;
++      padding: 2px 10px;
++      border-radius: 20px;
++      font-size: 12px;
++      font-weight: 600;
++      background: #1f6feb22;
++      color: #388bfd;
++      border: 1px solid #1f6feb55;
++    }
++
++    .upload-zone {
++      background: #161b22;
++      border: 2px dashed #30363d;
++      border-radius: 12px;
++      padding: 32px 20px;
++      text-align: center;
++      cursor: pointer;
++      transition: border-color 0.2s, background 0.2s;
++      margin-bottom: 16px;
++      position: relative;
++    }
++    .upload-zone:hover, .upload-zone.drag-over {
++      border-color: #388bfd;
++      background: #1f6feb11;
++    }
++    .upload-zone input[type=file] {
++      position: absolute;
++      inset: 0;
++      opacity: 0;
++      cursor: pointer;
++      width: 100%;
++      height: 100%;
++    }
++    .upload-icon { font-size: 40px; margin-bottom: 12px; }
++    .upload-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
++    .upload-hint { font-size: 13px; color: #8b949e; }
++
++    .btn {
++      width: 100%;
++      padding: 14px;
++      border: none;
++      border-radius: 10px;
++      font-size: 16px;
++      font-weight: 600;
++      cursor: pointer;
++      transition: opacity 0.2s;
++      margin-bottom: 12px;
++    }
++    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
++    .btn-primary { background: #1f6feb; color: #fff; }
++    .btn-primary:hover:not(:disabled) { background: #388bfd; }
++
++    .file-list {
++      background: #161b22;
++      border: 1px solid #30363d;
++      border-radius: 10px;
++      overflow: hidden;
++      margin-bottom: 16px;
++    }
++    .file-list-header {
++      padding: 10px 16px;
++      font-size: 13px;
++      color: #8b949e;
++      border-bottom: 1px solid #30363d;
++    }
++    .file-item {
++      display: flex;
++      align-items: center;
++      gap: 10px;
++      padding: 10px 16px;
++      border-bottom: 1px solid #21262d;
++      font-size: 14px;
++    }
++    .file-item:last-child { border-bottom: none; }
++    .file-icon { font-size: 20px; }
++    .file-name { flex: 1; color: #e6edf3; word-break: break-all; }
++    .file-size { color: #8b949e; font-size: 12px; white-space: nowrap; }
++    .file-status { font-size: 18px; }
++
++    .progress-bar {
++      width: 100%;
++      height: 6px;
++      background: #21262d;
++      border-radius: 3px;
++      overflow: hidden;
++      margin-bottom: 12px;
++      display: none;
++    }
++    .progress-fill {
++      height: 100%;
++      background: linear-gradient(90deg, #1f6feb, #388bfd);
++      border-radius: 3px;
++      width: 0%;
++      transition: width 0.3s;
++    }
++
++    .alert {
++      padding: 14px 16px;
++      border-radius: 10px;
++      font-size: 14px;
++      margin-bottom: 16px;
++      display: none;
++    }
++    .alert-success { background: #1a3a2a; border: 1px solid #2ea04355; color: #3fb950; }
++    .alert-error   { background: #3a1a1a; border: 1px solid #f8514955; color: #f85149; }
++
++    .empty-state { text-align: center; padding: 20px; color: #8b949e; font-size: 14px; }
++    .loading { text-align: center; padding: 20px; color: #8b949e; }
++    .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #30363d; border-top-color: #388bfd; border-radius: 50%; animation: spin 0.8s linear infinite; }
++    @keyframes spin { to { transform: rotate(360deg); } }
++
++    .success-screen { text-align: center; padding: 40px 20px; display: none; }
++    .success-icon { font-size: 64px; margin-bottom: 16px; }
++    .success-title { font-size: 22px; font-weight: 700; color: #3fb950; margin-bottom: 8px; }
++    .success-sub { color: #8b949e; font-size: 15px; }
++  </style>
++</head>
++<body>
++  <div class="container">
++    <div class="header">
++      <div class="logo">
++        <div class="logo-icon">🏛️</div>
++        <div class="logo-text">Delhi Municipal Corporation</div>
++      </div>
++      <div class="subtitle">Complaint Document Upload</div>
++    </div>
++
++    <div id="loading" class="loading">
++      <div class="spinner"></div>
++      <p style="margin-top:12px;font-size:14px;color:#8b949e;">Loading ticket details…</p>
++    </div>
++
++    <div id="errorScreen" style="display:none">
++      <div class="alert alert-error" style="display:block">
++        ❌ Ticket not found. Please check the link sent to you via SMS.
++      </div>
++    </div>
++
++    <div id="mainContent" style="display:none">
++      <div class="ticket-card" id="ticketCard"></div>
++
++      <div id="alertSuccess" class="alert alert-success">✅ Files uploaded successfully! Thank you.</div>
++      <div id="alertError"   class="alert alert-error">❌ Upload failed. Please try again.</div>
++
++      <div class="upload-zone" id="uploadZone">
++        <input type="file" id="fileInput" accept="image/*,.pdf,.doc,.docx" multiple/>
++        <div class="upload-icon">📎</div>
++        <div class="upload-title">Tap to select files</div>
++        <div class="upload-hint">Photos, PDFs, or documents (max 10MB each)</div>
++      </div>
++
++      <div id="selectedFiles" class="file-list" style="display:none">
++        <div class="file-list-header" id="selectedHeader">Selected files</div>
++        <div id="selectedList"></div>
++      </div>
++
++      <div class="progress-bar" id="progressBar">
++        <div class="progress-fill" id="progressFill"></div>
++      </div>
++
++      <button class="btn btn-primary" id="uploadBtn" disabled>Upload Documents</button>
++
++      <div id="uploadedFiles" style="display:none" class="file-list">
++        <div class="file-list-header">Previously uploaded files</div>
++        <div id="uploadedList"></div>
++      </div>
++    </div>
++
++    <div class="success-screen" id="successScreen">
++      <div class="success-icon">✅</div>
++      <div class="success-title">Documents Uploaded!</div>
++      <div class="success-sub">Your files have been attached to the complaint. DMC will review and contact you soon.</div>
++    </div>
++  </div>
++
++  <script src="/upload.js"></script>
++</body>
++</html>
+diff --git a/public/upload.js b/public/upload.js
+new file mode 100644
+index 0000000..68b462d
+--- /dev/null
++++ b/public/upload.js
+@@ -0,0 +1,175 @@
++(function () {
++  'use strict';
++
++  // Extract token from URL: /upload/:token
++  const token = window.location.pathname.split('/')[2] || '';
++
++  const loading       = document.getElementById('loading');
++  const errorScreen   = document.getElementById('errorScreen');
++  const mainContent   = document.getElementById('mainContent');
++  const ticketCard    = document.getElementById('ticketCard');
++  const fileInput     = document.getElementById('fileInput');
++  const selectedFiles = document.getElementById('selectedFiles');
++  const selectedList  = document.getElementById('selectedList');
++  const selectedHeader= document.getElementById('selectedHeader');
++  const uploadBtn     = document.getElementById('uploadBtn');
++  const progressBar   = document.getElementById('progressBar');
++  const progressFill  = document.getElementById('progressFill');
++  const alertSuccess  = document.getElementById('alertSuccess');
++  const alertError    = document.getElementById('alertError');
++  const uploadedFiles = document.getElementById('uploadedFiles');
++  const uploadedList  = document.getElementById('uploadedList');
++  const successScreen = document.getElementById('successScreen');
++
++  let selectedFileList = [];
++  let ticketData       = null;
++
++  // ── Load ticket via token ─────────────────────────────────────────────────
++  async function loadTicket() {
++    try {
++      const res = await fetch(`/api/upload/${token}`);
++      if (res.status === 410) {
++        showError('⏰ This upload link has expired. Please call DMC helpline for a new link.');
++        return;
++      }
++      if (!res.ok) throw new Error('Not found');
++      ticketData = await res.json();
++      renderTicket(ticketData);
++      renderUploadedFiles(ticketData.files || []);
++      loading.style.display     = 'none';
++      mainContent.style.display = 'block';
++    } catch {
++      showError('❌ Invalid or expired link. Please check the SMS sent to you.');
++    }
++  }
++
++  function showError(msg) {
++    loading.style.display = 'none';
++    errorScreen.style.display = 'block';
++    document.querySelector('#errorScreen .alert-error').textContent = msg;
++  }
++
++  function renderTicket(t) {
++    const expiry = new Date(t.uploadExpiry).toLocaleString('en-IN');
++    ticketCard.innerHTML = `
++      <div class="ticket-id">🎫 ${esc(t.id)}</div>
++      <div class="ticket-row"><span class="ticket-label">Name</span><span class="ticket-value">${esc(t.name)}</span></div>
++      <div class="ticket-row"><span class="ticket-label">Phone</span><span class="ticket-value">${esc(t.phone)}</span></div>
++      <div class="ticket-row"><span class="ticket-label">Complaint</span><span class="ticket-value">${esc(t.complaint)}</span></div>
++      <div class="ticket-row"><span class="ticket-label">Status</span><span class="ticket-value"><span class="status-badge">${esc(t.status)}</span></span></div>
++      <div class="ticket-row" style="margin-top:8px"><span class="ticket-label" style="color:#f0a030">⏰ Expires</span><span class="ticket-value" style="color:#f0a030;font-size:13px">${expiry}</span></div>
++    `;
++  }
++
++  function renderUploadedFiles(files) {
++    if (!files.length) return;
++    uploadedFiles.style.display = 'block';
++    uploadedList.innerHTML = files.map(f => `
++      <div class="file-item">
++        <span class="file-icon">${fileIcon(f.mimeType)}</span>
++        <span class="file-name">${esc(f.originalName)}</span>
++        <span class="file-status">✅</span>
++      </div>
++    `).join('');
++  }
++
++  // ── File selection ────────────────────────────────────────────────────────
++  const uploadZone = document.getElementById('uploadZone');
++
++  fileInput.addEventListener('change', () => {
++    selectedFileList = Array.from(fileInput.files);
++    renderSelected();
++  });
++
++  uploadZone.addEventListener('dragover',  (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
++  uploadZone.addEventListener('dragleave', ()  => uploadZone.classList.remove('drag-over'));
++  uploadZone.addEventListener('drop', (e) => {
++    e.preventDefault();
++    uploadZone.classList.remove('drag-over');
++    selectedFileList = Array.from(e.dataTransfer.files);
++    renderSelected();
++  });
++
++  function renderSelected() {
++    const oversized = selectedFileList.filter(f => f.size > 10 * 1024 * 1024);
++    if (oversized.length) {
++      alertError.textContent   = `❌ Files exceed 10MB: ${oversized.map(f => f.name).join(', ')}`;
++      alertError.style.display = 'block';
++      selectedFileList = selectedFileList.filter(f => f.size <= 10 * 1024 * 1024);
++    }
++    if (!selectedFileList.length) {
++      selectedFiles.style.display = 'none';
++      uploadBtn.disabled = true;
++      return;
++    }
++    selectedFiles.style.display = 'block';
++    selectedHeader.textContent  = `${selectedFileList.length} file${selectedFileList.length > 1 ? 's' : ''} selected`;
++    selectedList.innerHTML = selectedFileList.map(f => `
++      <div class="file-item">
++        <span class="file-icon">${fileIcon(f.type)}</span>
++        <span class="file-name">${esc(f.name)}</span>
++        <span class="file-size">${formatSize(f.size)}</span>
++      </div>
++    `).join('');
++    uploadBtn.disabled = false;
++  }
++
++  // ── Upload ────────────────────────────────────────────────────────────────
++  uploadBtn.addEventListener('click', async () => {
++    if (!selectedFileList.length) return;
++    alertSuccess.style.display = 'none';
++    alertError.style.display   = 'none';
++    uploadBtn.disabled = true;
++    progressBar.style.display  = 'block';
++    progressFill.style.width   = '0%';
++
++    const formData = new FormData();
++    selectedFileList.forEach(f => formData.append('files', f));
++
++    try {
++      let prog = 0;
++      const iv = setInterval(() => {
++        prog = Math.min(prog + 8, 85);
++        progressFill.style.width = prog + '%';
++      }, 150);
++
++      const res = await fetch(`/api/upload/${token}`, { method: 'POST', body: formData });
++      clearInterval(iv);
++      progressFill.style.width = '100%';
++
++      if (res.status === 410) throw new Error('expired');
++      if (!res.ok) throw new Error('failed');
++
++      setTimeout(() => {
++        progressBar.style.display  = 'none';
++        mainContent.style.display  = 'none';
++        successScreen.style.display = 'block';
++      }, 500);
++    } catch (err) {
++      progressBar.style.display = 'none';
++      alertError.textContent    = err.message === 'expired'
++        ? '⏰ This upload link has expired.'
++        : '❌ Upload failed. Please try again.';
++      alertError.style.display  = 'block';
++      uploadBtn.disabled = false;
++    }
++  });
++
++  // ── Utils ─────────────────────────────────────────────────────────────────
++  function esc(s) {
++    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
++  }
++  function formatSize(b) {
++    if (b < 1024) return b + ' B';
++    if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
++    return (b/1048576).toFixed(1) + ' MB';
++  }
++  function fileIcon(mime) {
++    if (!mime) return '📄';
++    if (mime.startsWith('image/')) return '🖼️';
++    if (mime === 'application/pdf') return '📕';
++    return '📄';
++  }
++
++  loadTicket();
++})();
+diff --git a/server.js b/server.js
+index 7c162fe..48429b8 100644
+--- a/server.js
++++ b/server.js
+@@ -14,6 +14,11 @@ const http   = require('http');
+ const fs     = require('fs');
+ const path   = require('path');
+ const { WebSocketServer } = require('ws');
++const busboy = require('busboy');
++
++// Ensure uploads directory exists
++const UPLOADS_DIR = path.join(__dirname, 'uploads');
++fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+ 
+ const { handleConnection }                                 = require('./lib/ws-handler');
+ const { transcriptBus, getOrCreateBrowserSession,
+@@ -21,6 +26,7 @@ const { transcriptBus, getOrCreateBrowserSession,
+ const { getReply }                                        = require('./lib/gemini');
+ const { synthesizeForBrowser }                            = require('./lib/tts');
+ const { makeCall }                                        = require('./lib/twilio-call');
++const { getTicket, getTicketByToken, addFile, getAllTickets } = require('./lib/ticket-store');
+ 
+ const PORT       = process.env.PORT || 3000;
+ const PUBLIC_DIR = path.join(__dirname, 'public');
+@@ -88,6 +94,8 @@ async function requestHandler(req, res) {
+   if (req.method === 'GET') {
+     if (p === '/')           { serveFile(res, path.join(PUBLIC_DIR, 'index.html'));      return; }
+     if (p === '/simulation') { serveFile(res, path.join(PUBLIC_DIR, 'simulation.html')); return; }
++    if (p === '/tickets')    { serveFile(res, path.join(PUBLIC_DIR, 'tickets.html'));    return; }
++    if (p === '/api/tickets') { json(res, 200, getAllTickets()); return; }
+     const ext = path.extname(p);
+     if (MIME[ext])           { serveFile(res, path.join(PUBLIC_DIR, p));                return; }
+   }
+@@ -145,8 +153,8 @@ async function requestHandler(req, res) {
+       const base = getPublicBase(req);
+       const call = await makeCall(to, base);
+ 
+-      transcriptBus.emit('transcript', { type: 'call_started', callSid: call.Sid, to });
+-      json(res, 200, { callSid: call.Sid, status: call.Status });
++      transcriptBus.emit('transcript', { type: 'call_started', callSid: call.sid, to });
++      json(res, 200, { callSid: call.sid, status: call.status });
+     } catch (err) {
+       console.error('[/api/call]', err.message);
+       json(res, 500, { error: err.message });
+@@ -213,6 +221,79 @@ async function requestHandler(req, res) {
+     return;
+   }
+ 
++  // ── GET /upload/:token — serve upload page (temporary link) ─────────────
++  const uploadPageMatch = p.match(/^\/upload\/([a-f0-9]+)$/);
++  if (uploadPageMatch && req.method === 'GET') {
++    serveFile(res, path.join(PUBLIC_DIR, 'upload.html'));
++    return;
++  }
++
++  // ── GET /api/upload/:token — ticket details via token ────────────────────
++  const tokenApiMatch = p.match(/^\/api\/upload\/([a-f0-9]+)$/);
++  if (tokenApiMatch && req.method === 'GET') {
++    const { ticket, error } = getTicketByToken(tokenApiMatch[1]);
++    if (error === 'expired') { json(res, 410, { error: 'This upload link has expired.' }); return; }
++    if (!ticket) { json(res, 404, { error: 'Invalid upload link.' }); return; }
++    json(res, 200, ticket);
++    return;
++  }
++
++  // ── GET /api/ticket/:id — ticket details by ID (for dashboard) ───────────
++  const ticketApiMatch = p.match(/^\/api\/ticket\/([^/]+)$/);
++  if (ticketApiMatch && req.method === 'GET') {
++    const ticket = getTicket(ticketApiMatch[1]);
++    if (!ticket) { json(res, 404, { error: 'Ticket not found' }); return; }
++    json(res, 200, ticket);
++    return;
++  }
++
++  // ── POST /api/upload/:token — file upload via token ──────────────────────
++  const uploadApiMatch = p.match(/^\/api\/upload\/([a-f0-9]+)$/);
++  if (uploadApiMatch && req.method === 'POST') {
++    const { ticket, error } = getTicketByToken(uploadApiMatch[1]);
++    if (error === 'expired') { json(res, 410, { error: 'This upload link has expired.' }); return; }
++    if (!ticket) { json(res, 404, { error: 'Invalid upload link.' }); return; }
++    const ticketId = ticket.id;
++
++    const contentType = req.headers['content-type'] || '';
++    if (!contentType.includes('multipart/form-data')) {
++      json(res, 400, { error: 'Expected multipart/form-data' }); return;
++    }
++
++    const ticketDir = path.join(UPLOADS_DIR, ticketId);
++    fs.mkdirSync(ticketDir, { recursive: true });
++
++    const bb = busboy({ headers: req.headers, limits: { fileSize: 10 * 1024 * 1024 } });
++    const savedFiles = [];
++
++    bb.on('file', (fieldname, fileStream, info) => {
++      const { filename, mimeType } = info;
++      const safeName = `${Date.now()}-${path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
++      const destPath = path.join(ticketDir, safeName);
++      const writeStream = fs.createWriteStream(destPath);
++
++      fileStream.pipe(writeStream);
++      writeStream.on('finish', () => {
++        const meta = { filename: safeName, originalName: filename, mimeType, uploadedAt: new Date().toISOString() };
++        addFile(ticketId, meta);
++        savedFiles.push(meta);
++        console.log(`[UPLOAD] ${ticketId} — saved: ${safeName}`);
++      });
++    });
++
++    bb.on('finish', () => {
++      json(res, 200, { success: true, filesCount: ticket.files.length });
++    });
++
++    bb.on('error', (err) => {
++      console.error('[UPLOAD] busboy error:', err.message);
++      json(res, 500, { error: 'Upload failed' });
++    });
++
++    req.pipe(bb);
++    return;
++  }
++
+   res.writeHead(404); res.end('Not Found');
+ }
+ 

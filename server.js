@@ -27,6 +27,12 @@ const { getReply }                                        = require('./lib/gemin
 const { synthesizeForBrowser }                            = require('./lib/tts');
 const { makeCall }                                        = require('./lib/twilio-call');
 const { getTicket, getTicketByToken, addFile, getAllTickets } = require('./lib/ticket-store');
+const { createOtp, verifyOtp, createSession,
+        getSession, deleteSession, parseSessionCookie } = require('./lib/auth-store');
+const { sendTicketSms } = require('./lib/sms');
+const { sendOtpEmail }  = require('./lib/email');
+
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
 
 const PORT       = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -91,11 +97,44 @@ async function requestHandler(req, res) {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   // ── Static pages ─────────────────────────────────────────────────────────
+  // ── Session helper ───────────────────────────────────────────────────────
+  const sessionToken = parseSessionCookie(req.headers.cookie);
+  const session      = getSession(sessionToken);
+
   if (req.method === 'GET') {
     if (p === '/')           { serveFile(res, path.join(PUBLIC_DIR, 'index.html'));      return; }
     if (p === '/simulation') { serveFile(res, path.join(PUBLIC_DIR, 'simulation.html')); return; }
-    if (p === '/tickets')    { serveFile(res, path.join(PUBLIC_DIR, 'tickets.html'));    return; }
-    if (p === '/api/tickets') { json(res, 200, getAllTickets()); return; }
+    if (p === '/jarvis')     { serveFile(res, path.join(PUBLIC_DIR, 'jarvis.html'));      return; }
+    if (p === '/login')      { serveFile(res, path.join(PUBLIC_DIR, 'login.html'));      return; }
+    if (p === '/my-tickets') { serveFile(res, path.join(PUBLIC_DIR, 'my-tickets.html')); return; }
+
+    // Admin-only pages
+    if (p === '/tickets') {
+      if (!session || session.role !== 'admin') { res.writeHead(302, { Location: '/login?next=/tickets' }); res.end(); return; }
+      serveFile(res, path.join(PUBLIC_DIR, 'tickets.html'));
+      return;
+    }
+    if (p === '/api/tickets') {
+      if (!session || session.role !== 'admin') { json(res, 401, { error: 'Unauthorized' }); return; }
+      json(res, 200, getAllTickets());
+      return;
+    }
+
+    // Auth: current user info
+    if (p === '/api/auth/me') {
+      if (!session) { json(res, 401, { error: 'Not logged in' }); return; }
+      json(res, 200, { id: session.id, role: session.role });
+      return;
+    }
+
+    // Citizen: their own tickets by phone
+    if (p === '/api/my-tickets') {
+      if (!session || session.role !== 'citizen') { json(res, 401, { error: 'Unauthorized' }); return; }
+      const phone   = session.id;
+      const myTickets = getAllTickets().filter(t => t.phone === phone || t.phone === '+91' + phone.replace(/\D/g,'').slice(-10));
+      json(res, 200, myTickets);
+      return;
+    }
     const ext = path.extname(p);
     if (MIME[ext])           { serveFile(res, path.join(PUBLIC_DIR, p));                return; }
   }
@@ -218,6 +257,87 @@ async function requestHandler(req, res) {
     const send = (e) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(e)}\n\n`); };
     transcriptBus.on('transcript', send);
     req.on('close', () => transcriptBus.off('transcript', send));
+    return;
+  }
+
+  // ── POST /api/auth/send-otp ───────────────────────────────────────────────
+  if (p === '/api/auth/send-otp' && req.method === 'POST') {
+    const { identifier, type } = await readBody(req); // type: 'citizen' | 'admin'
+    if (!identifier) { json(res, 400, { error: 'Missing identifier' }); return; }
+
+    if (type === 'admin') {
+      const email = identifier.toLowerCase().trim();
+      if (!ADMIN_EMAILS.includes(email)) { json(res, 403, { error: 'Not an admin email.' }); return; }
+      const otp = createOtp(email);
+      try {
+        await sendOtpEmail(email, otp);
+        json(res, 200, { ok: true, message: `OTP sent to ${email}` });
+      } catch (err) {
+        console.error('[EMAIL OTP]', err.message);
+        json(res, 500, { error: 'Failed to send OTP email. Check EMAIL_USER / EMAIL_PASS in .env' });
+      }
+
+    } else {
+      // Citizen — OTP via SMS
+      const digits = identifier.replace(/\D/g, '');
+      const phone  = digits.length === 10 ? '+91' + digits : (digits.startsWith('91') ? '+' + digits : identifier);
+      const otp    = createOtp(phone);
+      try {
+        await sendTicketSms(phone, 'OTP', `Your DMC login OTP is: ${otp}. Valid for 5 minutes.`);
+      } catch (err) {
+        console.error('[OTP SMS]', err.message);
+        json(res, 500, { error: 'Failed to send OTP. Check your phone number.' });
+        return;
+      }
+      json(res, 200, { ok: true, phone });
+    }
+    return;
+  }
+
+  // ── POST /api/auth/verify-otp ─────────────────────────────────────────────
+  if (p === '/api/auth/verify-otp' && req.method === 'POST') {
+    const { identifier, otp, type } = await readBody(req);
+    if (!identifier || !otp) { json(res, 400, { error: 'Missing fields' }); return; }
+
+    const id = type === 'admin'
+      ? identifier.toLowerCase().trim()
+      : '+91' + identifier.replace(/\D/g, '').slice(-10);
+
+    const result = verifyOtp(id, otp);
+    if (!result.ok) { json(res, 401, { error: result.reason }); return; }
+
+    const role  = type === 'admin' ? 'admin' : 'citizen';
+    const token = createSession(id, role);
+
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Set-Cookie':   `session=${token}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax`,
+    });
+    res.end(JSON.stringify({ ok: true, role, id }));
+    return;
+  }
+
+  // ── POST /api/auth/logout ─────────────────────────────────────────────────
+  if (p === '/api/auth/logout' && req.method === 'POST') {
+    if (sessionToken) deleteSession(sessionToken);
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Set-Cookie':   'session=; HttpOnly; Path=/; Max-Age=0',
+    });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  // ── PATCH /api/admin/ticket/:id/status — admin update status ─────────────
+  if (p.match(/^\/api\/admin\/ticket\/([^/]+)\/status$/) && req.method === 'PATCH') {
+    if (!session || session.role !== 'admin') { json(res, 401, { error: 'Unauthorized' }); return; }
+    const ticketId = p.split('/')[4];
+    const { status, note } = await readBody(req);
+    const ticket = getTicket(ticketId);
+    if (!ticket) { json(res, 404, { error: 'Ticket not found' }); return; }
+    if (status) ticket.status = status;
+    if (note)   ticket.notes  = [...(ticket.notes || []), { text: note, by: session.id, at: new Date().toISOString() }];
+    json(res, 200, ticket);
     return;
   }
 

@@ -21,7 +21,9 @@
       "Bash(cmd //c \"taskkill /F /PID 28616\")",
       "Bash(cmd //c \"taskkill /F /PID 12036\")",
       "Bash(cmd //c \"curl -s -o nul -w \\\\\"%%{http_code}\\\\\" https://8fba-2a09-bac6-d866-1a8c-00-2a5-ea.ngrok-free.app/api/voice\" 2>&1)",
-      "Bash(cmd //c \"taskkill /F /PID 15684\")"
+      "Bash(cmd //c \"taskkill /F /PID 15684\")",
+      "Bash(cmd //c \"taskkill /F /PID 4344\")",
+      "Bash(cmd //c \"taskkill /F /PID 2132\")"
     ]
   }
 }
