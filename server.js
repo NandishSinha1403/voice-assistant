@@ -26,7 +26,7 @@ const { transcriptBus, getOrCreateBrowserSession,
 const { getReply }                                        = require('./lib/gemini');
 const { synthesizeForBrowser }                            = require('./lib/tts');
 const { makeCall }                                        = require('./lib/twilio-call');
-const { getTicket, getTicketByToken, addFile, getAllTickets } = require('./lib/ticket-store');
+const { createTicket, getTicket, getTicketByToken, addFile, getAllTickets } = require('./lib/ticket-store');
 const { createOtp, verifyOtp, createSession,
         getSession, deleteSession, parseSessionCookie } = require('./lib/auth-store');
 const { sendTicketSms } = require('./lib/sms');
@@ -135,6 +135,22 @@ async function requestHandler(req, res) {
       json(res, 200, myTickets);
       return;
     }
+    // Citizen: create a new complaint ticket
+    if (p === '/api/tickets' && req.method === 'POST') {
+      if (!session || session.role !== 'citizen') { json(res, 401, { error: 'Unauthorized' }); return; }
+      const { name, complaint } = await readBody(req);
+      const trimName = (name || '').trim();
+      const trimComplaint = (complaint || '').trim();
+      if (!trimName || trimName.length > 100) { json(res, 400, { error: 'Name is required (1-100 characters)' }); return; }
+      if (trimComplaint.length < 10 || trimComplaint.length > 2000) { json(res, 400, { error: 'Complaint must be 10-2000 characters' }); return; }
+      const phone = session.id;
+      const ticket = createTicket(trimName, phone, trimComplaint);
+      const uploadUrl = `${getPublicBase(req)}/upload/${ticket.uploadToken}`;
+      sendTicketSms(phone, ticket.id, uploadUrl).catch(e => console.error('[SMS]', e.message));
+      json(res, 201, { ticket, uploadUrl });
+      return;
+    }
+
     const ext = path.extname(p);
     if (MIME[ext])           { serveFile(res, path.join(PUBLIC_DIR, p));                return; }
   }

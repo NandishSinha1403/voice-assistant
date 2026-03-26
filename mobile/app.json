@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Jarvis Mobile",
+    "slug": "jarvis-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {}
+  }
+}

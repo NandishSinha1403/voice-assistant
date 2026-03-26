@@ -23,7 +23,12 @@
       "Bash(cmd //c \"curl -s -o nul -w \\\\\"%%{http_code}\\\\\" https://8fba-2a09-bac6-d866-1a8c-00-2a5-ea.ngrok-free.app/api/voice\" 2>&1)",
       "Bash(cmd //c \"taskkill /F /PID 15684\")",
       "Bash(cmd //c \"taskkill /F /PID 4344\")",
-      "Bash(cmd //c \"taskkill /F /PID 2132\")"
+      "Bash(cmd //c \"taskkill /F /PID 2132\")",
+      "Bash(find 'B:\\\\delhi hackathon imp\\\\mobile' -not -path */node_modules/* -not -path */.expo/*)",
+      "Bash(npm view:*)",
+      "Bash(npm ls:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npx expo:*)"
     ]
   }
 }
