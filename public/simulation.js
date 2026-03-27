@@ -40,7 +40,7 @@
     if (transcriptEmpty) transcriptEmpty.style.display = 'none';
     const div = document.createElement('div');
     div.className = role === 'user' ? 'msg msg-user' : 'msg msg-ai';
-    div.innerHTML = `<span class="msg-label">${role === 'user' ? '🎤 Caller' : '🤖 Jarvis'}</span>${escapeHtml(text)}`;
+    div.innerHTML = `<span class="msg-label">${role === 'user' ? '🎤 Caller' : '🤖 Samadhan'}</span>${escapeHtml(text)}`;
     transcriptBody.appendChild(div);
     transcriptBody.scrollTop = transcriptBody.scrollHeight;
     msgTotal++;
@@ -179,7 +179,7 @@
   }
 
   function onCallConnected(sid) {
-    setStatus('connected', 'Call connected — Jarvis is listening');
+    setStatus('connected', 'Call connected — Samadhan is listening');
     if (sid) callSidEl.textContent = `SID: ${sid}`;
   }
 

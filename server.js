@@ -118,7 +118,7 @@ async function requestHandler(req, res) {
   if (req.method === 'GET') {
     if (p === '/')           { serveFile(res, path.join(PUBLIC_DIR, 'index.html'));      return; }
     if (p === '/simulation') { serveFile(res, path.join(PUBLIC_DIR, 'simulation.html')); return; }
-    if (p === '/jarvis')     { serveFile(res, path.join(PUBLIC_DIR, 'jarvis.html'));      return; }
+    if (p === '/samadhan')     { serveFile(res, path.join(PUBLIC_DIR, 'samadhan.html'));      return; }
     if (p === '/login')      { serveFile(res, path.join(PUBLIC_DIR, 'login.html'));      return; }
     if (p === '/my-tickets') { serveFile(res, path.join(PUBLIC_DIR, 'my-tickets.html')); return; }
 
@@ -194,7 +194,7 @@ async function requestHandler(req, res) {
     // Exotel Streams requires bidirectional="true" for two-way audio
     xml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Hello! Jarvis AI is now listening. Please speak after the tone.</Say>
+  <Say>Hello! Samadhan AI is now listening. Please speak after the tone.</Say>
   <Connect>
     <Stream url="wss://${base}/api/stream" bidirectional="true"/>
   </Connect>
@@ -461,7 +461,7 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(PORT, () => {
   const base = process.env.BASE_URL || `http://localhost:${PORT}`;
-  console.log(`\n🤖  Jarvis AI Voice Agent`);
+  console.log(`\n🤖  Samadhan AI Voice Agent`);
   console.log(`    Dashboard   → http://localhost:${PORT}/`);
   console.log(`    Simulation  → http://localhost:${PORT}/simulation`);
   console.log(`    Voice hook  → POST ${base}/api/voice  (Twilio)\n`);
