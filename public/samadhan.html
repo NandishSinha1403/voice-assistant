@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Browser Demo | Samadhan</title>
+  <link rel="stylesheet" href="theme.css">
+</head>
+<body style="padding-bottom: 60px;">
+
+<nav class="navbar">
+  <div class="container">
+    <div class="nav-inner">
+      <a href="/" class="nav-brand">
+        <div style="font-size: 2rem;">🏛️</div>
+        <div class="brand-text">
+          <span class="brand-name">Samadhan</span>
+          <span class="brand-sub">AI Citizen Helpline</span>
+        </div>
+      </a>
+      <ul class="nav-links">
+        <li><a href="/" class="nav-link">Home</a></li>
+        <li><a href="/simulation" class="nav-link">Call Simulation</a></li>
+        <li><a href="/my-tickets" class="nav-link">Track Ticket</a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<section class="section">
+  <div class="container" style="max-width: 800px;">
+    <div class="text-center mb-4">
+      <span class="label">Browser Assistant Demo</span>
+      <h1>Interact with Samadhan</h1>
+      <p class="lead">Experience Samadhan AI directly in your browser. Speak naturally to file complaints or inquire about municipal services.</p>
+    </div>
+
+    <div class="text-center mb-2">
+      <div id="pill" class="badge badge-pending" style="padding: 0.5rem 1.5rem; background: var(--color-surface-muted); color: var(--color-navy); border-color: var(--color-navy); display: inline-flex; align-items: center; gap: 8px;">
+        <span class="live-dot" id="liveDot" style="margin-right: 0;"></span>
+        <span id="pillTxt" class="ui-text" style="font-weight: 700;">READY TO START</span>
+      </div>
+    </div>
+
+    <div class="transcript-box">
+      <div class="transcript-header">
+        <div class="status-item">
+          <span class="label" style="margin-bottom: 0;">Voice Conversation</span>
+        </div>
+        <div id="msgCnt" class="ui-text" style="color: var(--color-text-muted);">0 messages</div>
+      </div>
+      <div class="transcript-body" id="msgs">
+        <div id="empty" class="text-center" style="color: var(--color-text-muted); padding: 4rem 0;">
+          <p class="ui-text">Speak or click the microphone to start the conversation...</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center mt-2">
+       <p class="ui-text" style="color: var(--color-text-muted); font-size: 0.8rem;">Powered by Gemini 2.5 Flash & Google Speech Services</p>
+    </div>
+  </div>
+</section>
+
+<footer class="status-bar">
+  <div class="container">
+    <div class="status-bar-inner">
+      <div class="status-item">
+        <span style="color: #4ade80;">● Browser Voice Engine</span>
+        <span style="opacity: 0.5;">|</span>
+        <span>SAMADHAN LIVE</span>
+      </div>
+      <div class="ui-text" style="opacity: 0.7;">Microphone Access Required</div>
+    </div>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -41,7 +41,7 @@
     liveDot.classList.add('on');
     const d = document.createElement('div');
     d.className = 'msg ' + role;
-    d.innerHTML = `<span class="msg-label">${role === 'user' ? '🎤 You' : '🤖 Jarvis'}</span>${esc(text)}`;
+    d.innerHTML = `<span class="msg-label">${role === 'user' ? '🎤 You' : '🤖 Samadhan'}</span>${esc(text)}`;
     msgs.appendChild(d);
     msgs.scrollTop = msgs.scrollHeight;
     total++;
@@ -81,7 +81,7 @@
   // ── AI pipeline: text → Gemini → TTS → play ───────────────────────────────────
   async function chat(text) {
     setState('thinking', 'THINKING…');
-    hint.textContent = 'Jarvis is thinking…';
+    hint.textContent = 'Samadhan is thinking…';
 
     let data;
     try {
@@ -190,7 +190,7 @@
     stopMic();
     if (audio) { audio.pause(); audio = null; }
     setState('idle', 'TAP TO START');
-    hint.textContent = 'Click the orb to talk to Jarvis';
+    hint.textContent = 'Click the orb to talk to Samadhan';
     hint.classList.remove('error');
     liveDot.classList.remove('on');
   }

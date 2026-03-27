@@ -99,7 +99,7 @@ The server starts on `http://localhost:3000` with these pages:
 |-----|-------------|
 | `http://localhost:3000/` | Main dashboard |
 | `http://localhost:3000/simulation` | Voice call simulation (browser mic) |
-| `http://localhost:3000/jarvis` | Jarvis chat interface |
+| `http://localhost:3000/samadhan` | Jarvis chat interface |
 | `http://localhost:3000/login` | Login page (citizen / admin) |
 | `http://localhost:3000/my-tickets` | Citizen ticket list |
 | `http://localhost:3000/tickets` | Admin ticket dashboard (requires login) |
