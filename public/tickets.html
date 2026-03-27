@@ -89,6 +89,21 @@
     .action-resolve{border-color:rgba(34,197,94,.25);color:var(--green)}
     .action-resolve:hover{border-color:var(--green);background:rgba(34,197,94,.08)}
 
+    /* severity chips */
+    .sev-chip{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700;color:#fff;min-width:28px;text-align:center}
+    .sev-low{background:#22c55e}
+    .sev-mid{background:#f59e0b}
+    .sev-high{background:#ef4444}
+
+    /* group rows */
+    .group-row{cursor:pointer;background:rgba(37,99,235,.04)}
+    .group-row:hover td{background:rgba(37,99,235,.08)}
+    .group-arrow{display:inline-block;transition:transform .2s;margin-right:6px;font-size:10px}
+    .group-arrow.open{transform:rotate(90deg)}
+    .count-badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;background:rgba(37,99,235,.15);color:var(--blue3);margin-left:8px}
+    .sub-row td{padding-left:36px !important;opacity:.85}
+    .sub-row td:first-child{padding-left:36px !important}
+
     .badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600}
     .badge-green{background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.25)}
 
@@ -168,6 +183,8 @@
     <button class="filter-btn" data-filter="open">Open</button>
     <button class="filter-btn" data-filter="in-progress">In Progress</button>
     <button class="filter-btn" data-filter="resolved">Resolved</button>
+    <button class="filter-btn" id="groupBtn">Group similar</button>
+    <button class="filter-btn" id="sortSevBtn">Sort by severity ↓</button>
     <button class="refresh-btn" id="refreshBtn">Refresh</button>
   </div>
 
@@ -180,6 +197,7 @@
           <th>Name</th>
           <th>Phone</th>
           <th>Complaint</th>
+          <th>Severity</th>
           <th>Status</th>
           <th>Files</th>
           <th>Filed</th>
@@ -187,7 +205,7 @@
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="8" style="text-align:center;padding:40px"><div class="spinner"></div></td></tr>
+        <tr><td colspan="9" style="text-align:center;padding:40px"><div class="spinner"></div></td></tr>
       </tbody>
     </table>
   </div>
@@ -199,14 +217,71 @@
 
 <script>
 (function () {
-  let allTickets  = [];
+  let allTickets   = [];
   let activeFilter = 'all';
+  let groupMode    = false;
+  let sortBySev    = false;
+  let expandedGroups = new Set();
 
   const tableBody   = document.getElementById('tableBody');
   const mobileCards = document.getElementById('mobileCards');
   const searchInput = document.getElementById('searchInput');
   const refreshBtn  = document.getElementById('refreshBtn');
+  const groupBtn    = document.getElementById('groupBtn');
+  const sortSevBtn  = document.getElementById('sortSevBtn');
 
+  // ── Severity chip helper ────────────────────────────────────────────────────
+  function sevChip(score) {
+    const s = score || 0;
+    const cls = s <= 3 ? 'sev-low' : s <= 6 ? 'sev-mid' : 'sev-high';
+    return '<span class="sev-chip ' + cls + '">' + s + '</span>';
+  }
+
+  // ── Similarity helpers ──────────────────────────────────────────────────────
+  function normalizeWords(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  }
+
+  function jaccardSim(a, b) {
+    var setA = new Set(a), setB = new Set(b), inter = 0;
+    setA.forEach(function(w) { if (setB.has(w)) inter++; });
+    var union = setA.size + setB.size - inter;
+    return union === 0 ? 0 : inter / union;
+  }
+
+  function isSimilar(t1, t2) {
+    var w1 = normalizeWords(t1.complaint), w2 = normalizeWords(t2.complaint);
+    var n1 = w1.join(' '), n2 = w2.join(' ');
+    if (n1.includes(n2) || n2.includes(n1)) return true;
+    return jaccardSim(w1, w2) >= 0.6;
+  }
+
+  function groupTickets(arr) {
+    var sorted = arr.slice().sort(function(a, b) { return new Date(a.createdAt) - new Date(b.createdAt); });
+    var groups = [];
+    sorted.forEach(function(t) {
+      var found = false;
+      for (var i = 0; i < groups.length; i++) {
+        if (isSimilar(groups[i].representative, t)) {
+          groups[i].tickets.push(t);
+          if ((t.severityScore || 0) > (groups[i].representative.severityScore || 0)) {
+            groups[i].representative = t;
+          }
+          groups[i].count = groups[i].tickets.length;
+          groups[i].aggregateSeverity = Math.min(10, (groups[i].representative.severityScore || 0) + groups[i].count - 1);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        groups.push({ representative: t, tickets: [t], count: 1, aggregateSeverity: t.severityScore || 0 });
+      }
+    });
+    groups.sort(function(a, b) { return b.aggregateSeverity - a.aggregateSeverity; });
+    return groups;
+  }
+
+  // ── Data loading ────────────────────────────────────────────────────────────
   async function load() {
     try {
       const res = await fetch('/api/tickets');
@@ -214,7 +289,7 @@
       updateStats();
       render();
     } catch {
-      tableBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#f87171;padding:40px">Failed to load tickets</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#f87171;padding:40px">Failed to load tickets</td></tr>';
       mobileCards.innerHTML = '<div class="empty-state"><div class="empty-icon">❌</div><div class="empty-title">Failed to load</div></div>';
     }
   }
@@ -227,6 +302,50 @@
     document.getElementById('statToday').textContent = allTickets.filter(t => t.createdAt?.startsWith(today)).length;
   }
 
+  // ── Render a single ticket row ──────────────────────────────────────────────
+  function ticketRow(t, extraClass) {
+    const date    = new Date(t.createdAt);
+    const dateStr = date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    const timeStr = date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const statusClass = (t.status || 'open').replace(' ', '-');
+    return '<tr class="' + (extraClass || '') + '">' +
+      '<td class="ticket-id-cell">' + esc(t.id) + '</td>' +
+      '<td class="name-cell">' + esc(t.name) + '</td>' +
+      '<td class="phone-cell">' + esc(t.phone) + '</td>' +
+      '<td class="complaint-cell"><div class="complaint-text" title="' + esc(t.complaint) + '">' + esc(t.complaint) + '</div></td>' +
+      '<td>' + sevChip(t.severityScore) + '</td>' +
+      '<td><span class="status-pill status-' + statusClass + '">' + (t.status || 'open') + '</span></td>' +
+      '<td class="files-cell">' + (t.files?.length ? '<span class="badge badge-green">📎 ' + t.files.length + '</span>' : '<span style="color:var(--muted)">—</span>') + '</td>' +
+      '<td class="date-cell">' + dateStr + '<br>' + timeStr + '</td>' +
+      '<td class="actions-cell">' +
+        '<a class="action-link" href="/upload/' + (t.uploadToken || '') + '" target="_blank">📎 Docs</a>' +
+        (t.status === 'open' ? '<button class="action-link action-start" data-action="status" data-id="' + t.id + '" data-status="in-progress">▶ Start</button>' : '') +
+        (t.status === 'in-progress' ? '<button class="action-link action-resolve" data-action="status" data-id="' + t.id + '" data-status="resolved">✓ Resolve</button>' : '') +
+      '</td></tr>';
+  }
+
+  // ── Render a mobile card ────────────────────────────────────────────────────
+  function mobileCard(t) {
+    const date = new Date(t.createdAt).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+    const statusClass = (t.status || 'open').replace(' ', '-');
+    return '<div class="m-card">' +
+      '<div class="m-card-top">' +
+        '<div class="m-card-id">' + esc(t.id) + '</div>' +
+        '<div>' + sevChip(t.severityScore) + ' <span class="status-pill status-' + statusClass + '">' + (t.status || 'open') + '</span></div>' +
+      '</div>' +
+      '<div class="m-card-complaint">' + esc(t.complaint) + '</div>' +
+      '<div class="m-card-meta">' +
+        '<span>' + esc(t.name) + '</span><span>' + esc(t.phone) + '</span><span>📅 ' + date + '</span>' +
+        (t.files?.length ? '<span>📎 ' + t.files.length + ' files</span>' : '') +
+      '</div>' +
+      '<div class="m-card-actions">' +
+        '<a class="action-link" href="/upload/' + (t.uploadToken || '') + '" target="_blank">📎 Docs</a>' +
+        (t.status === 'open' ? '<button class="action-link action-start" data-action="status" data-id="' + t.id + '" data-status="in-progress">▶ Start</button>' : '') +
+        (t.status === 'in-progress' ? '<button class="action-link action-resolve" data-action="status" data-id="' + t.id + '" data-status="resolved">✓ Resolve</button>' : '') +
+      '</div></div>';
+  }
+
+  // ── Main render ─────────────────────────────────────────────────────────────
   function render() {
     const q = searchInput.value.toLowerCase().trim();
     let list = allTickets.filter(t => {
@@ -235,81 +354,116 @@
       return (t.name + t.phone + t.complaint + t.id).toLowerCase().includes(q);
     });
 
+    if (sortBySev && !groupMode) {
+      list.sort(function(a, b) { return (b.severityScore || 0) - (a.severityScore || 0); });
+    }
+
     if (!list.length) {
-      const emptyHtml = `
-        <div class="empty-state">
-          <div class="empty-icon">📭</div>
-          <div class="empty-title">${allTickets.length === 0 ? 'No tickets yet' : 'No matching tickets'}</div>
-          <div class="empty-sub">${allTickets.length === 0 ? 'Complaints filed via phone calls will appear here.' : 'Try a different search or filter.'}</div>
-        </div>`;
-      tableBody.innerHTML = `<tr><td colspan="8">${emptyHtml}</td></tr>`;
+      const emptyHtml = '<div class="empty-state"><div class="empty-icon">📭</div>' +
+        '<div class="empty-title">' + (allTickets.length === 0 ? 'No tickets yet' : 'No matching tickets') + '</div>' +
+        '<div class="empty-sub">' + (allTickets.length === 0 ? 'Complaints filed via phone calls will appear here.' : 'Try a different search or filter.') + '</div></div>';
+      tableBody.innerHTML = '<tr><td colspan="9">' + emptyHtml + '</td></tr>';
       mobileCards.innerHTML = emptyHtml;
       return;
     }
 
-    // Desktop table
-    tableBody.innerHTML = list.map(t => {
-      const date   = new Date(t.createdAt);
-      const dateStr = date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-      const timeStr = date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-      const statusClass = (t.status || 'open').replace(' ', '-');
-      return `
-        <tr>
-          <td class="ticket-id-cell">${esc(t.id)}</td>
-          <td class="name-cell">${esc(t.name)}</td>
-          <td class="phone-cell">${esc(t.phone)}</td>
-          <td class="complaint-cell"><div class="complaint-text" title="${esc(t.complaint)}">${esc(t.complaint)}</div></td>
-          <td><span class="status-pill status-${statusClass}">${t.status || 'open'}</span></td>
-          <td class="files-cell">${t.files?.length ? `<span class="badge badge-green">📎 ${t.files.length}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
-          <td class="date-cell">${dateStr}<br>${timeStr}</td>
-          <td class="actions-cell">
-            <a class="action-link" href="/upload/${t.uploadToken || ''}" target="_blank">📎 Docs</a>
-            ${t.status === 'open'        ? `<button class="action-link action-start" data-action="status" data-id="${t.id}" data-status="in-progress">▶ Start</button>` : ''}
-            ${t.status === 'in-progress' ? `<button class="action-link action-resolve" data-action="status" data-id="${t.id}" data-status="resolved">✓ Resolve</button>` : ''}
-          </td>
-        </tr>`;
-    }).join('');
+    if (groupMode) {
+      renderGrouped(list);
+    } else {
+      tableBody.innerHTML = list.map(function(t) { return ticketRow(t, ''); }).join('');
+      mobileCards.innerHTML = list.map(mobileCard).join('');
+    }
+  }
 
-    // Mobile cards
-    mobileCards.innerHTML = list.map(t => {
-      const date = new Date(t.createdAt).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
-      const statusClass = (t.status || 'open').replace(' ', '-');
-      return `
-        <div class="m-card">
-          <div class="m-card-top">
-            <div class="m-card-id">${esc(t.id)}</div>
-            <span class="status-pill status-${statusClass}">${t.status || 'open'}</span>
-          </div>
-          <div class="m-card-complaint">${esc(t.complaint)}</div>
-          <div class="m-card-meta">
-            <span>${esc(t.name)}</span>
-            <span>${esc(t.phone)}</span>
-            <span>📅 ${date}</span>
-            ${t.files?.length ? `<span>📎 ${t.files.length} files</span>` : ''}
-          </div>
-          <div class="m-card-actions">
-            <a class="action-link" href="/upload/${t.uploadToken || ''}" target="_blank">📎 Docs</a>
-            ${t.status === 'open'        ? `<button class="action-link action-start" data-action="status" data-id="${t.id}" data-status="in-progress">▶ Start</button>` : ''}
-            ${t.status === 'in-progress' ? `<button class="action-link action-resolve" data-action="status" data-id="${t.id}" data-status="resolved">✓ Resolve</button>` : ''}
-          </div>
-        </div>`;
-    }).join('');
+  // ── Grouped render ──────────────────────────────────────────────────────────
+  function renderGrouped(list) {
+    var groups = groupTickets(list);
+    var html = '';
+    var mHtml = '';
+
+    groups.forEach(function(g, gi) {
+      var rep = g.representative;
+      var isOpen = expandedGroups.has(gi);
+      var date = new Date(rep.createdAt);
+      var dateStr = date.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
+      var timeStr = date.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
+      var statusClass = (rep.status || 'open').replace(' ', '-');
+
+      // Group header row
+      html += '<tr class="group-row" data-group="' + gi + '">' +
+        '<td class="ticket-id-cell"><span class="group-arrow ' + (isOpen ? 'open' : '') + '">▶</span>' + esc(rep.id) + '</td>' +
+        '<td class="name-cell">' + esc(rep.name) + '</td>' +
+        '<td class="phone-cell">' + esc(rep.phone) + '</td>' +
+        '<td class="complaint-cell"><div class="complaint-text" title="' + esc(rep.complaint) + '">' + esc(rep.complaint) + '</div>' +
+          (g.count > 1 ? '<span class="count-badge">×' + g.count + '</span>' : '') + '</td>' +
+        '<td>' + sevChip(g.aggregateSeverity) + '</td>' +
+        '<td><span class="status-pill status-' + statusClass + '">' + (rep.status || 'open') + '</span></td>' +
+        '<td class="files-cell">' + (rep.files?.length ? '<span class="badge badge-green">📎 ' + rep.files.length + '</span>' : '<span style="color:var(--muted)">—</span>') + '</td>' +
+        '<td class="date-cell">' + dateStr + '<br>' + timeStr + '</td>' +
+        '<td class="actions-cell">' +
+          '<a class="action-link" href="/upload/' + (rep.uploadToken || '') + '" target="_blank">📎 Docs</a>' +
+          (rep.status === 'open' ? '<button class="action-link action-start" data-action="status" data-id="' + rep.id + '" data-status="in-progress">▶ Start</button>' : '') +
+          (rep.status === 'in-progress' ? '<button class="action-link action-resolve" data-action="status" data-id="' + rep.id + '" data-status="resolved">✓ Resolve</button>' : '') +
+        '</td></tr>';
+
+      // Sub-rows (if expanded and group has more than 1)
+      if (isOpen && g.count > 1) {
+        g.tickets.forEach(function(t) {
+          if (t.id === rep.id) return; // skip representative
+          html += ticketRow(t, 'sub-row');
+        });
+      }
+
+      // Mobile: show representative card with count badge
+      mHtml += mobileCard(rep);
+    });
+
+    tableBody.innerHTML = html;
+    mobileCards.innerHTML = mHtml;
   }
 
   function esc(s) {
     return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  // Events
+  // ── Events ──────────────────────────────────────────────────────────────────
   searchInput.addEventListener('input', render);
   refreshBtn.addEventListener('click', load);
-  document.querySelectorAll('.filter-btn').forEach(btn => {
+
+  // Filter buttons (exclude groupBtn and sortSevBtn)
+  document.querySelectorAll('.filter-btn[data-filter]').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.filter-btn[data-filter]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       activeFilter = btn.dataset.filter;
       render();
     });
+  });
+
+  // Group toggle
+  groupBtn.addEventListener('click', () => {
+    groupMode = !groupMode;
+    groupBtn.classList.toggle('active', groupMode);
+    expandedGroups.clear();
+    render();
+  });
+
+  // Sort by severity toggle
+  sortSevBtn.addEventListener('click', () => {
+    sortBySev = !sortBySev;
+    sortSevBtn.classList.toggle('active', sortBySev);
+    render();
+  });
+
+  // Expand/collapse group rows
+  document.addEventListener('click', (e) => {
+    const row = e.target.closest('.group-row');
+    if (row) {
+      const gi = parseInt(row.dataset.group, 10);
+      if (expandedGroups.has(gi)) expandedGroups.delete(gi); else expandedGroups.add(gi);
+      render();
+      return;
+    }
   });
 
   // Auth check
@@ -323,13 +477,14 @@
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-action="status"]');
     if (!btn) return;
+    e.stopPropagation(); // prevent group expand/collapse
     const id     = btn.dataset.id;
     const status = btn.dataset.status;
-    const note   = prompt(`Add a note for ticket ${id} (optional):`);
-    await fetch(`/api/admin/ticket/${id}/status`, {
+    const note   = prompt('Add a note for ticket ' + id + ' (optional):');
+    await fetch('/api/admin/ticket/' + id + '/status', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, note: note || undefined }),
+      body: JSON.stringify({ status: status, note: note || undefined }),
     });
     load();
   });

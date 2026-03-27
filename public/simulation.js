@@ -113,16 +113,25 @@
 
     callBtn.disabled = true;
     callBtn.textContent = '⏳  Initiating…';
-    setStatus('ringing', 'Placing call via Exotel…');
+    setStatus('ringing', 'Placing call via Twilio…');
     setOrbState('thinking');
 
     try {
-      const res = await fetch('/api/call', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: number }),
-      });
-      const data = await res.json();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      let res;
+      try {
+        res = await fetch('/api/call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: number }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+      let data = {};
+      try { data = await res.json(); } catch { data = { error: `Server returned ${res.status}` }; }
       if (!res.ok) throw new Error(data.error || 'Call failed');
 
       callSid = data.callSid;
@@ -149,8 +158,10 @@
     } catch (err) {
       callBtn.disabled = false;
       callBtn.textContent = '📞 \u00a0Call Now';
-      setStatus('ended', 'Error: ' + err.message);
+      const msg = err.name === 'AbortError' ? 'Timed out — server not responding' : err.message;
+      setStatus('ended', '⚠ ' + msg);
       setOrbState('idle');
+      console.error('[call]', err);
     }
   }
 

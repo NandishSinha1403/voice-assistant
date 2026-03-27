@@ -122,7 +122,7 @@
     let fullTranscript = '';
 
     recog = new SpeechRecognition();
-    recog.lang            = 'en-IN';
+    recog.lang            = 'hi-IN';
     recog.continuous      = true;   // keep listening until silence timeout
     recog.interimResults  = true;   // get partial results to build full sentence
     recog.maxAlternatives = 1;

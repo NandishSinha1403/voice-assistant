@@ -29,7 +29,7 @@ const { makeCall }                                        = require('./lib/twili
 const { createTicket, getTicket, getTicketByToken, addFile, getAllTickets } = require('./lib/ticket-store');
 const { createOtp, verifyOtp, createSession,
         getSession, deleteSession, parseSessionCookie } = require('./lib/auth-store');
-const { sendTicketSms } = require('./lib/sms');
+const { sendOtpSms, sendTicketSms } = require('./lib/sms');
 const { sendOtpEmail }  = require('./lib/email');
 
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
@@ -71,6 +71,20 @@ function readBody(req) {
     req.on('data', c => { body += c; });
     req.on('end', () => {
       try { resolve(JSON.parse(body)); } catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
+function readFormBody(req) {
+  return new Promise((resolve) => {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      const params = new URLSearchParams(body);
+      const obj = {};
+      for (const [k, v] of params) obj[k] = v;
+      resolve(obj);
     });
     req.on('error', () => resolve({}));
   });
@@ -138,13 +152,13 @@ async function requestHandler(req, res) {
     // Citizen: create a new complaint ticket
     if (p === '/api/tickets' && req.method === 'POST') {
       if (!session || session.role !== 'citizen') { json(res, 401, { error: 'Unauthorized' }); return; }
-      const { name, complaint } = await readBody(req);
+      const { name, complaint, severityScore } = await readBody(req);
       const trimName = (name || '').trim();
       const trimComplaint = (complaint || '').trim();
       if (!trimName || trimName.length > 100) { json(res, 400, { error: 'Name is required (1-100 characters)' }); return; }
       if (trimComplaint.length < 10 || trimComplaint.length > 2000) { json(res, 400, { error: 'Complaint must be 10-2000 characters' }); return; }
       const phone = session.id;
-      const ticket = createTicket(trimName, phone, trimComplaint);
+      const ticket = createTicket(trimName, phone, trimComplaint, severityScore || 5);
       const uploadUrl = `${getPublicBase(req)}/upload/${ticket.uploadToken}`;
       sendTicketSms(phone, ticket.id, uploadUrl).catch(e => console.error('[SMS]', e.message));
       json(res, 201, { ticket, uploadUrl });
@@ -155,19 +169,20 @@ async function requestHandler(req, res) {
     if (MIME[ext])           { serveFile(res, path.join(PUBLIC_DIR, p));                return; }
   }
 
-  // ── Twilio: incoming call TwiML (ConversationRelay) ──────────────────────
+  // ── Twilio: incoming/outbound call TwiML (Media Streams + Gemini Live) ──────
   if (p === '/api/voice' && (req.method === 'POST' || req.method === 'GET')) {
-    const base = getPublicBase(req).replace(/^https?:\/\//, '');
-    const wsUrl = `wss://${base}/api/stream`;
-    console.log(`[TwiML] ConversationRelay → ${wsUrl}`);
+    const formBody   = req.method === 'POST' ? await readFormBody(req) : {};
+    const base       = getPublicBase(req).replace(/^https?:\/\//, '');
+    // For outbound calls: To = the number we dialled (the citizen)
+    const callerPhone = formBody.To || formBody.From || '';
+    const wsUrl      = `wss://${base}/api/stream`;
+    console.log(`[TwiML] Media Streams → ${wsUrl}, callerPhone: ${callerPhone}`);
     xml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <ConversationRelay url="${wsUrl}"
-      welcomeGreeting="Namaste! Welcome to Delhi Municipal Corporation helpline. You can speak in Hindi, Hinglish, or English. Please go ahead."
-      language="en-IN"
-      interruptByDtmf="false"
-    />
+    <Stream url="${wsUrl}">
+      <Parameter name="callerPhone" value="${callerPhone}"/>
+    </Stream>
   </Connect>
 </Response>`);
     return;
@@ -198,7 +213,7 @@ async function requestHandler(req, res) {
     return;
   }
 
-  // ── POST /api/call — initiate outbound call via Exotel ───────────────────
+  // ── POST /api/call — initiate outbound call via Twilio ───────────────────
   if (p === '/api/call' && req.method === 'POST') {
     try {
       const body = await readBody(req);
@@ -217,11 +232,10 @@ async function requestHandler(req, res) {
     return;
   }
 
-  // ── POST /api/call/end — hang up call via Exotel ─────────────────────────
+  // ── POST /api/call/end — end active call ─────────────────────────────────
   if (p === '/api/call/end' && req.method === 'POST') {
     try {
       const { callSid } = await readBody(req);
-      // Exotel doesn't have a direct hangup API for in-progress calls via REST
       // Signal the frontend that the call ended
       transcriptBus.emit('transcript', { type: 'call_ended', callSid });
       json(res, 200, { ok: true });
@@ -294,12 +308,12 @@ async function requestHandler(req, res) {
       }
 
     } else {
-      // Citizen — OTP via SMS
+      // Citizen — OTP via Twilio SMS
       const digits = identifier.replace(/\D/g, '');
       const phone  = digits.length === 10 ? '+91' + digits : (digits.startsWith('91') ? '+' + digits : identifier);
       const otp    = createOtp(phone);
       try {
-        await sendTicketSms(phone, 'OTP', `Your DMC login OTP is: ${otp}. Valid for 5 minutes.`);
+        await sendOtpSms(phone, otp);
       } catch (err) {
         console.error('[OTP SMS]', err.message);
         json(res, 500, { error: 'Failed to send OTP. Check your phone number.' });
@@ -438,8 +452,8 @@ const server = http.createServer(requestHandler);
 const wss    = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
-  if (req.url === '/api/stream') {
-    wss.handleUpgrade(req, socket, head, ws => handleConnection(ws));
+  if (req.url === '/api/stream' || req.url.startsWith('/api/stream?')) {
+    wss.handleUpgrade(req, socket, head, ws => handleConnection(ws, req));
   } else {
     socket.destroy();
   }

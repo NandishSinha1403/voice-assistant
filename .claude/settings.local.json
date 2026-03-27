@@ -28,7 +28,20 @@
       "Bash(npm view:*)",
       "Bash(npm ls:*)",
       "Bash(npm uninstall:*)",
-      "Bash(npx expo:*)"
+      "Bash(npx expo:*)",
+      "Bash(node -c server.js)",
+      "Bash(node -c lib/gemini.js)",
+      "Bash(node -c lib/ticket-store.js)",
+      "Bash(node -c lib/ws-handler.js)",
+      "Bash(node -c lib/stt.js)",
+      "Bash(node -c public/simulation.js)",
+      "Bash(node -e \"require\\(''@google/genai''\\); console.log\\(''OK''\\)\")",
+      "WebFetch(domain:googleapis.github.io)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebSearch",
+      "WebFetch(domain:help.twilio.com)",
+      "Bash(grep -E \"\\\\.html$\")"
     ]
   }
 }
